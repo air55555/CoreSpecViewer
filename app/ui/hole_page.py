@@ -1023,7 +1023,7 @@ class HoleControlPanel(QWidget):
         """
         logger.info(f"Button clicked: Profile Mineral Map")
         modes = ['pearson', 'sam', 'msam']
-        valid_state, msg = self.cxt.requires(self.cxt.BASE_HOLE)
+        valid_state, msg = self.cxt.requires(self.cxt.CORRELATION_MULTI,self.cxt.BASE_HOLE)
         if not valid_state:
             logger.warning(msg)
             QMessageBox.information(self, "Mineral Mapping", msg)
@@ -1073,7 +1073,7 @@ class HoleControlPanel(QWidget):
         """
         logger.info(f"Button clicked: Profile Mineral Map")
         modes = ['pearson', 'sam', 'msam']
-        valid_state, msg = self.cxt.requires([self.cxt.CORRELATION_MULTI,self.cxt.BASE_HOLE])
+        valid_state, msg = self.cxt.requires(self.cxt.CORRELATION_MULTI,self.cxt.BASE_HOLE)
         if not valid_state:
             logger.warning(msg)
             QMessageBox.information(self, "Mineral Mapping", msg)
