@@ -15,7 +15,7 @@ import logging
 
 import numpy as np
 
-from ..spectral_ops import spectral_functions as sf
+from ..spectral_ops.processing import unwrap_from_stats, compute_downhole_mineral_fractions
 from ..spectral_ops import downhole_resampling as res
 from .processed_object import ProcessedObject
 from .dataset import Dataset
@@ -136,7 +136,7 @@ class HoleObject:
             
 # =============================================================================
             for po in self:
-                img = sf.unwrap_from_stats(po.mask, po.savgol, po.stats)
+                img = unwrap_from_stats(po.mask, po.savgol, po.stats)
                 checkpoint_1 = time.perf_counter()
                 logger.debug(f"Unwrapped {po.datasets['metadata'].data['box number']}: {checkpoint_1 - start:.4f}s")
                 depths = np.linspace(float(po.metadata['core depth start']), 
@@ -214,8 +214,8 @@ class HoleObject:
         legend = dicts[0]
         
         for po in self:
-            seg = sf.unwrap_from_stats(po.mask, po.datasets[ind_key].data, po.stats)
-            fractions, dominant = sf.compute_downhole_mineral_fractions(seg.data, seg.mask, 
+            seg = unwrap_from_stats(po.mask, po.datasets[ind_key].data, po.stats)
+            fractions, dominant = compute_downhole_mineral_fractions(seg.data, seg.mask, 
                                                                      po.datasets[leg_key].data)
             if full_fractions is None:
                 # First box → just take it as-is
@@ -252,7 +252,7 @@ class HoleObject:
                 logger.warning(f"Box {po.metadata['box number']} {key} dataset is not a masked array.")
                 raise ValueError(f"Box {po.metadata['box number']} {key} dataset is not a masked array.")
                 
-            seg = sf.unwrap_from_stats(po.datasets[key].data.mask, po.datasets[key].data.data, po.stats)
+            seg = unwrap_from_stats(po.datasets[key].data.mask, po.datasets[key].data.data, po.stats)
             feat_row = np.ma.mean(seg, axis=1)
             if full_feature is None:
                 full_feature = feat_row

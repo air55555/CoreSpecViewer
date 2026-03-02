@@ -16,10 +16,9 @@
   - [x] Test with newer versions where appropriate
   - [x] Document any version constraints
   
-- [ ] **Refactor spectral_functions.py**
-  - [ ] Split into logical modules (io, processing, visualization, correlation)
-  - [ ] Decouple `con_dict` from pure algorithms
-  - [ ] Document sensor-specific logic clearly
+- [x] **Refactor spectral_functions.py**
+  - [x] Split into logical modules (io, processing, visualization, correlation)
+  - [x] Decouple `con_dict` from pure algorithms
 
 ---
 

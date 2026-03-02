@@ -22,7 +22,7 @@ Subpackages
     Dataset and CurrentContext. These wrap on-disk data, memory-mapped arrays,
     metadata and hole-level organisation.
 
-- spectral
+- spectral_ops
     Spectral utilities and feature extraction helpers. Provides convenience
     functions for reflectance correction, false-colour composites, spectral
     features, and correlation/mineral-mapping back-ends.
@@ -30,7 +30,7 @@ Subpackages
 Other modules
 -------------
 - config
-    Single in-memory configuration dictionary (con_dict) and helpers to load,
+    Single in-memory configuration singleton and helpers to load,
     mutate and persist user settings.
 
 - main

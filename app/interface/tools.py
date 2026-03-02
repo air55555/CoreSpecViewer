@@ -10,7 +10,11 @@ import numpy as np
 
 from ..config import config
 from ..models import ProcessedObject, RawObject
-from ..spectral_ops import spectral_functions as sf
+from ..spectral_ops.visualisation import get_false_colour
+from ..spectral_ops.processing import resample_spectrum, unwrap_from_stats, remove_cont
+
+from ..spectral_ops import analysis as sa
+from ..spectral_ops import masking as sm
 from ..spectral_ops import remap_legend as rl
 from ..spectral_ops import band_maths as bm
 
@@ -151,9 +155,9 @@ def crop_auto(obj):
             arr = obj.temp_reflectance
         else:
             arr = obj.reflectance
-        img = sf.get_false_colour(arr)
+        img = get_false_colour(arr)
         img = (img*255).astype(np.uint8)
-        cropped, slicer = sf.detect_slice_rectangles_robust(img)
+        cropped, slicer = sm.detect_slice_rectangles_robust(img)
         if slicer is None:
             return obj
         try:
@@ -171,13 +175,13 @@ def crop_auto(obj):
         base = getattr(obj, "savgol", None)
         if not isinstance(base, np.ndarray) or base.ndim < 2 or 0 in base.shape:
             return obj
-        img = sf.get_false_colour(base)
+        img = get_false_colour(base)
         img = np.asarray(img)
         if img.ndim < 2 or 0 in img.shape:
             return obj
         img = (img * 255).astype(np.uint8, copy=False)
 
-        cropped, slicer = sf.detect_slice_rectangles_robust(img)
+        cropped, slicer = sm.detect_slice_rectangles_robust(img)
         if slicer is None:
             return obj
         try:
@@ -252,14 +256,14 @@ def mask_point(obj, mode, y, x):
     if mode == 'new':
         msk = np.zeros(obj.savgol.shape[:2])
         pixel_vec = obj.savgol_cr[y, x, :]
-        corr = sf.numpy_pearson(obj.savgol_cr, pixel_vec)
+        corr = sa.numpy_pearson(obj.savgol_cr, pixel_vec)
         msk[corr > 0.9] = 1
         obj.add_temp_dataset('mask', data = msk)
         return obj
     if mode == 'enhance':
         msk = np.array(obj.mask)
         pixel_vec = obj.savgol_cr[y, x, :]
-        corr = sf.numpy_pearson(obj.savgol_cr, pixel_vec)
+        corr = sa.numpy_pearson(obj.savgol_cr, pixel_vec)
         msk[corr > 0.9] = 1
         obj.add_temp_dataset('mask', data = msk)
         return obj
@@ -309,7 +313,7 @@ def improve_mask(obj):
     Heuristically thicken a mask column-wise using simple occupancy.
     Mask values follow the convention 0 = valid, 1 = masked.
     """
-    msk = sf.improve_mask_from_graph(obj.mask)
+    msk = sm.improve_mask_from_graph(obj.mask)
     obj.add_temp_dataset('mask', data = msk)
     return obj
 
@@ -318,7 +322,7 @@ def despeckle_mask(obj):
     Heuristically thicken a mask column-wise using simple occupancy.
     Mask values follow the convention 0 = valid, 1 = masked.
     """
-    msk = sf.despeckle_mask(obj.mask)
+    msk = sm.despeckle_mask(obj.mask)
     obj.add_temp_dataset('mask', data = msk)
     return obj
 
@@ -330,7 +334,7 @@ def calc_unwrap_stats(obj):
     returned stats to a dataset for use in future unwrapping operations.
     Also creates a dataset image of the derived segments for user inspection
     """
-    label_image, stats = sf.get_stats_from_mask(obj.mask)
+    label_image, stats = sm.get_stats_from_mask(obj.mask)
     label_image = label_image / np.max(label_image)
     obj.add_temp_dataset('stats', stats, '.npy')
     obj.add_temp_dataset('segments', label_image, '.npy')
@@ -344,7 +348,7 @@ def unwrapped_output(obj):
     core box spectral cube and mask. Calculates mask-aware per pixel depths
     using depth values held in the metadata
     """
-    dhole_reflect = sf.unwrap_from_stats(obj.mask, obj.savgol, obj.stats)
+    dhole_reflect = unwrap_from_stats(obj.mask, obj.savgol, obj.stats)
     dhole_depths = np.linspace(float(obj.metadata['core depth start']), float(obj.metadata['core depth stop']),
                                     dhole_reflect.shape[0])
 
@@ -355,7 +359,7 @@ def unwrapped_output(obj):
     return obj
 #==========pass through helpers===============================================
 def get_cr(spectra):
-    return sf.cr(spectra)
+    return remove_cont(spectra)
 
 #========= Reflectance interpretation tools ===================================
 
@@ -365,7 +369,7 @@ def run_feature_extraction(obj, key):
     for a specified short-wave infrared absorption feature using multiple
     possible fitting techniques.
     """
-    pos, dep, feat_mask = sf.Combined_MWL(obj.savgol, obj.savgol_cr, obj.mask, obj.bands, key, technique = 'POLY')
+    pos, dep, feat_mask = sa.Combined_MWL(obj.savgol, obj.savgol_cr, obj.mask, obj.bands, key, technique = 'POLY')
     obj.add_temp_dataset(f'{key}POS', np.ma.masked_array(pos, mask = feat_mask), '.npz')
     obj.add_temp_dataset(f'{key}DEP', np.ma.masked_array(dep, mask = feat_mask), '.npz')
     return obj
@@ -385,8 +389,8 @@ def quick_corr(obj, x, y, key):
     clean_key = re.sub(r'[\\/:*?"<>|_]', '-', key)
     if obj.is_raw:
         return None
-    res_y = sf.resample_spectrum(x, y, obj.bands)
-    corr = np.ma.masked_array(sf.numpy_pearson(obj.savgol_cr, sf.cr(res_y)), mask = obj.mask)
+    res_y = resample_spectrum(x, y, obj.bands)
+    corr = np.ma.masked_array(sa.numpy_pearson(obj.savgol_cr, remove_cont(res_y)), mask = obj.mask)
     obj.add_temp_dataset(clean_key, corr, '.npz')
     return obj, clean_key
 
@@ -398,13 +402,13 @@ def wta_multi_range_minmap(obj, exemplars, coll_name, mode='pearson'):
     bands_nm = obj.bands
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    best_idx, best_score, best_window = sf.mineral_map_multirange(data,
+    best_idx, best_score, best_window = sa.mineral_map_multirange(data,
                                                                exemplar_stack,
                                                                bands_nm,
                                                                mode=mode
@@ -439,14 +443,14 @@ def wta_min_map_user_defined(obj, exemplars, coll_name, ranges, mode='pearson'):
     bands_nm = obj.bands
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_subrange(data, exemplar_stack, bands_nm, ranges, mode=mode)
+    index, confidence = sa.mineral_map_subrange(data, exemplar_stack, bands_nm, ranges, mode=mode)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
 
     obj.add_temp_dataset(f"{key_prefix}INDEX", index.astype(np.int16),  ".npy")
@@ -479,14 +483,14 @@ def wta_min_map_MSAM(obj, exemplars, coll_name, mode='numpy'):
     bands_nm = obj.bands
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_msam_strict(data, exemplar_stack)
+    index, confidence = sa.mineral_map_wta_msam_strict(data, exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
 
     obj.add_temp_dataset(f"{key_prefix}INDEX", index.astype(np.int16),  ".npy")
@@ -518,14 +522,14 @@ def wta_min_map_MSAM_direct(arr, exemplars, bands,  mode='numpy'):
     bands_nm = np.array(bands)
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_msam_strict(data, exemplar_stack)
+    index, confidence = sa.mineral_map_wta_msam_strict(data, exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
 
     return np.squeeze(index), np.squeeze(confidence)
@@ -553,14 +557,14 @@ def wta_min_map_SAM(obj, exemplars, coll_name, mode='numpy'):
     bands_nm = obj.bands
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_sam_strict(data, exemplar_stack)
+    index, confidence = sa.mineral_map_wta_sam_strict(data, exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
 
     obj.add_temp_dataset(f"{key_prefix}INDEX", index.astype(np.int16),  ".npy")
@@ -592,14 +596,14 @@ def wta_min_map_SAM_direct(arr, exemplars, bands,  mode='numpy'):
     bands_nm = np.array(bands)
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_sam_strict(data, exemplar_stack)
+    index, confidence = sa.mineral_map_wta_sam_strict(data, exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
 
     return np.squeeze(index), np.squeeze(confidence)
@@ -627,14 +631,14 @@ def wta_min_map(obj, exemplars, coll_name, mode='numpy'):
     bands_nm = obj.bands
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_strict(data, exemplar_stack)
+    index, confidence = sa.mineral_map_wta_strict(data, exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
 
     obj.add_temp_dataset(f"{key_prefix}INDEX", index.astype(np.int16),  ".npy")
@@ -666,14 +670,14 @@ def wta_min_map_direct(arr, exemplars, bands,  mode='numpy'):
     bands_nm = np.array(bands)
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_strict(data, exemplar_stack)
+    index, confidence = sa.mineral_map_wta_strict(data, exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
 
     return np.squeeze(index), np.squeeze(confidence)
@@ -713,7 +717,7 @@ def match_spectra(spectra_x, spectra_y, bands_nm):
     """
     passthrough fuction for matching a spectrum to a band range
     """
-    y_res = sf.resample_spectrum(np.asarray(spectra_x, float), np.asarray(spectra_y, float), bands_nm)
+    y_res = resample_spectrum(np.asarray(spectra_x, float), np.asarray(spectra_y, float), bands_nm)
     
     return y_res
 
@@ -736,7 +740,7 @@ def kmeans_caller(obj, clusters = 5, iters = 50):
     X = flat[idx]
     #spectral demands 3d array
     X_3d = X.reshape(-1, 1, B)
-    img, classes = sf.kmeans_spectral_wrapper(X_3d, clusters, iters)
+    img, classes = sa.kmeans_spectral_wrapper(X_3d, clusters, iters)
     img = np.squeeze(img)  # (N_valid,)
     # 4) rebuild labels to (H, W)
     labels_full = np.full(flat.shape[0], -1, dtype=int)

@@ -9,7 +9,8 @@ import logging
 import numpy as np
 
 from ..models import HoleObject
-from ..spectral_ops import spectral_functions as sf
+from ..spectral_ops.processing import resample_spectrum, remove_cont
+from ..spectral_ops import analysis as sa
 from ..spectral_ops import band_maths as bm
 from ..spectral_ops import export_ops as exp
 
@@ -21,9 +22,9 @@ def profile_kmeans(obj, clusters = 5, iters = 50):
     if "AvSpectra" not in list(obj.base_datasets.keys()):
         raise ValueError("Base datasets have not been calculated for this hole")
     h, b = obj.base_datasets["AvSpectra"].data.shape
-    data = sf.cr(obj.base_datasets["AvSpectra"].data)
+    data = remove_cont(obj.base_datasets["AvSpectra"].data)
     data = data[np.newaxis, :,:]
-    img, classes = sf.kmeans_spectral_wrapper(data, clusters, iters)
+    img, classes = sa.kmeans_spectral_wrapper(data, clusters, iters)
     img = np.squeeze(img)
     obj.add_product_dataset(f'PROF-kmeans-{clusters}-{iters}INDEX', img.astype(np.int16), '.npy')
     obj.add_product_dataset(f'PROF-kmeans-{clusters}-{iters}CLUSTERS', classes, '.npy')
@@ -42,11 +43,11 @@ def run_feature_extraction(obj, key):
     """
     data = obj.base_datasets["AvSpectra"].data
     data = data[np.newaxis, ...]
-    data_cr = sf.cr(data)
+    data_cr = remove_cont(data)
     mask = np.zeros((data.shape[:2]))
     bands = obj[obj.first_box].bands
     
-    pos, dep, feat_mask = sf.Combined_MWL(data, data_cr, mask, bands, key, technique = 'POLY')
+    pos, dep, feat_mask = sa.Combined_MWL(data, data_cr, mask, bands, key, technique = 'POLY')
     
     obj.add_product_dataset(f'PROF-{key}POS', 
                             np.ma.masked_array(np.squeeze(pos), mask = np.squeeze(feat_mask)), 
@@ -66,7 +67,7 @@ def band_math_interface(obj, name, expr, cr = False):
     if not cr:
         cube = obj.base_datasets["AvSpectra"].data[np.newaxis, ...]
     else:
-        cube = sf.cr(obj.base_datasets["AvSpectra"].data)[np.newaxis, ...]
+        cube = remove_cont(obj.base_datasets["AvSpectra"].data)[np.newaxis, ...]
     bands = obj[obj.first_box].bands
     out = bm.evaluate_expression(expr, cube, bands)
     clean_key = re.sub(r'[\\/:*?"<>|_]', '-', name)
@@ -91,18 +92,18 @@ def wta_min_map(obj, exemplars, coll_name, mode='numpy'):
     """
     coll_name = coll_name.replace('_', '')
     key_prefix = f"MinMap-pearson-{coll_name}"
-    data = sf.remove_hull(obj.base_datasets["AvSpectra"].data)
+    data = remove_cont(obj.base_datasets["AvSpectra"].data)
     bands_nm = obj.get_bands()
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_strict(data[np.newaxis,...], exemplar_stack)
+    index, confidence = sa.mineral_map_wta_strict(data[np.newaxis,...], exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
     obj.add_product_dataset(f'PROF-{key_prefix}INDEX', np.squeeze(index), '.npy')    
     obj.add_product_dataset(f'PROF-{key_prefix}CONF', np.squeeze(confidence), '.npy') 
@@ -128,18 +129,18 @@ def wta_min_map_SAM(obj, exemplars, coll_name, mode='numpy'):
     """
     coll_name = coll_name.replace('_', '')
     key_prefix = f"MinMap-SAM-{coll_name}"
-    data = sf.remove_hull(obj.base_datasets["AvSpectra"].data)
+    data = remove_cont(obj.base_datasets["AvSpectra"].data)
     bands_nm = obj.get_bands()
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_sam_strict(data[np.newaxis,...], exemplar_stack)
+    index, confidence = sa.mineral_map_wta_sam_strict(data[np.newaxis,...], exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
     obj.add_product_dataset(f'PROF-{key_prefix}INDEX', np.squeeze(index), '.npy')    
     obj.add_product_dataset(f'PROF-{key_prefix}CONF', np.squeeze(confidence), '.npy') 
@@ -166,18 +167,18 @@ def wta_min_map_MSAM(obj, exemplars, coll_name, mode='numpy'):
     """
     coll_name = coll_name.replace('_', '')
     key_prefix = f"MinMap-MSAM-{coll_name}"
-    data = sf.remove_hull(obj.base_datasets["AvSpectra"].data)
+    data = remove_cont(obj.base_datasets["AvSpectra"].data)
     bands_nm = obj.get_bands()
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_wta_msam_strict(data[np.newaxis,...], exemplar_stack)
+    index, confidence = sa.mineral_map_wta_msam_strict(data[np.newaxis,...], exemplar_stack)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
     obj.add_product_dataset(f'PROF-{key_prefix}INDEX', np.squeeze(index), '.npy')    
     obj.add_product_dataset(f'PROF-{key_prefix}CONF', np.squeeze(confidence), '.npy') 
@@ -203,18 +204,18 @@ def wta_min_map_user_defined(obj, exemplars, coll_name, ranges, mode='pearson'):
     """
     coll_name = coll_name.replace('_', '')
     key_prefix = f"MinMap-{ranges[0]}-{ranges[1]}-{mode}-{coll_name}"
-    data = sf.remove_hull(obj.base_datasets["AvSpectra"].data)
+    data = remove_cont(obj.base_datasets["AvSpectra"].data)
     bands_nm = obj.get_bands()
     labels, bank = [], []
     for _, (label, x_nm, y) in exemplars.items():
-        y_res = sf.resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
-        y_res = sf.cr(y_res[np.newaxis, :])[0]
+        y_res = resample_spectrum(np.asarray(x_nm, float), np.asarray(y, float), bands_nm)
+        y_res = remove_cont(y_res[np.newaxis, :])[0]
         labels.append(str(label))
         bank.append(y_res.astype(np.float32))
     if not bank:
         raise ValueError("No exemplars provided.")
     exemplar_stack = np.vstack(bank)
-    index, confidence = sf.mineral_map_subrange(data[np.newaxis,...], exemplar_stack, bands_nm, ranges, mode=mode)
+    index, confidence = sa.mineral_map_subrange(data[np.newaxis,...], exemplar_stack, bands_nm, ranges, mode=mode)
     legend = [{"index": i, "label": labels[i]} for i in range(len(labels))]
     obj.add_product_dataset(f'PROF-{key_prefix}INDEX', np.squeeze(index), '.npy')    
     obj.add_product_dataset(f'PROF-{key_prefix}CONF', np.squeeze(confidence), '.npy') 

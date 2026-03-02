@@ -31,6 +31,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QFileDialog,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -57,7 +58,8 @@ my_map.set_bad('black')
 
 from .display_text import gen_display_text
 from ..interface import tools as t
-from ..spectral_ops import spectral_functions as sf
+from ..spectral_ops.visualisation import get_false_colour
+#from ..spectral_ops import spectral_functions as sf
 
 
 #==========reference passing and cache update======================
@@ -319,7 +321,7 @@ class ImageCanvas2D(QWidget):
             self.ax.imshow(rgb, origin="upper")
 
         elif len(shp) == 3 and shp[2] > 3:
-            rgb = sf.get_false_colour(image)
+            rgb = get_false_colour(image)
             self.ax.clear()
             self.ax.imshow(rgb, origin="upper")
         else:
@@ -717,7 +719,7 @@ class SpectralImageCanvas(QWidget):
         self._last_rect = None  # reset any previous ROI
         self.cube = cube
         self.bands = bands
-        rgb = sf.get_false_colour(cube)
+        rgb = get_false_colour(cube)
         logger.debug(f"nans in rgb: {(np.isnan(rgb).any())}")
         logger.debug(f"shape of false colour {rgb.shape}")
         self.ax.clear()

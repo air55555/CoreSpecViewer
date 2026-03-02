@@ -11,7 +11,10 @@ import logging
 import numpy as np
 from PIL import Image
 
-from ..spectral_ops import spectral_functions as sf
+#from ..spectral_ops import spectral_functions as sf
+from ..spectral_ops import IO as io
+from ..spectral_ops.processing import remove_cont, process
+from ..spectral_ops.visualisation import get_false_colour, mk_thumb
 from .dataset import Dataset
 
 base_datasets = ["cropped", "savgol", "savgol_cr", "mask", "bands", "metadata", "display"]
@@ -180,11 +183,11 @@ class ProcessedObject:
         path = Path(head_path)
         root = path.parent
         name = path.stem
-        data, metadata = sf.load_envi(head_path, data_path)
+        data, metadata = io.load_envi(head_path, data_path)
         if meta_path is not None:
-            metadata = metadata | sf.parse_lumo_metadata(meta_path)
+            metadata = metadata | io.parse_lumo_metadata(meta_path)
         
-        band_key, bands = sf.find_bands(metadata, data)
+        band_key, bands = io.find_bands(metadata, data)
         
         if bands is None:
             logger.error("Cannot identify band names from the header file")
@@ -193,10 +196,10 @@ class ProcessedObject:
             savgol = data
             cropped = np.zeros_like(savgol)
             mask = np.zeros(savgol.shape[:2]).astype(int)
-            savgol_cr = sf.cr(savgol)
+            savgol_cr = remove_cont(savgol)
         else:
             cropped = data
-            savgol, savgol_cr, mask = sf.process(cropped)
+            savgol, savgol_cr, mask = process(cropped)
         po = cls.new(root, name)
         po.add_dataset('metadata', metadata, ext='.json')
         po.add_dataset('cropped', cropped, ext='.npy')
@@ -212,7 +215,7 @@ class ProcessedObject:
         """Generate RGB display dataset from savgol"""
         logger.info(f"Generating display dataset for {self.basename}")
         
-        rgb = sf.get_false_colour(self.savgol)
+        rgb = get_false_colour(self.savgol)
         rgb_uint8 = (rgb * 255).astype(np.uint8)
         
         self.add_dataset("display", rgb_uint8, ext=".npy") 
@@ -374,7 +377,7 @@ class ProcessedObject:
             if ds.ext == ".npy" and getattr(ds.data, "ndim", 0) > 1:
                 if key.startswith('Dhole'):
                     if key == 'DholeMask':
-                        im = sf.mk_thumb(ds.data)
+                        im = mk_thumb(ds.data)
                         im.save(str(final_path), quality = 95)
                         logger.info(f"Exported {self.basename} {key}")
                     else:
@@ -384,7 +387,7 @@ class ProcessedObject:
                                 mask_data = mask_to_use[:, :, 0]
                             elif mask_to_use.ndim == 2:
                                 mask_data = mask_to_use
-                            im = sf.mk_thumb(ds.data, mask=mask_data, index_mode=True, resize=False)
+                            im = mk_thumb(ds.data, mask=mask_data, index_mode=True, resize=False)
                             im.save(str(final_path), quality = 95)
                             logger.info(f"Exported {self.basename} {key}")
                         else:
@@ -392,24 +395,24 @@ class ProcessedObject:
                             
                             return
                 elif key == "mask":
-                    im = sf.mk_thumb(ds.data)
+                    im = mk_thumb(ds.data)
                     im.save(str(final_path), quality = 95)
                     
                     logger.info(f"Exported {self.basename} {key}")
                 elif key.endswith("INDEX"):
-                    im = sf.mk_thumb(ds.data, mask=self.mask, index_mode=True, resize=False)
+                    im = mk_thumb(ds.data, mask=self.mask, index_mode=True, resize=False)
                     im.save(str(final_path), quality = 95)
                     
                     logger.info(f"Exported {self.basename} {key}")
                 else:
-                    im = sf.mk_thumb(ds.data, mask=self.mask, resize=False)
+                    im = mk_thumb(ds.data, mask=self.mask, resize=False)
                     im.save(str(final_path), quality = 95)
                     
                     logger.info(f"Exported {self.basename} {key}")
                 
 
             elif ds.ext == ".npz":
-                im = sf.mk_thumb(ds.data.data, mask=ds.data.mask)
+                im = mk_thumb(ds.data.data, mask=ds.data.mask)
                 im.save(str(final_path), quality = 95)
                 
                 logger.info(f"Exported {self.basename} {key}")
@@ -434,17 +437,16 @@ class ProcessedObject:
         try:
             if ds.ext == ".npy" and getattr(ds.data, "ndim", 0) > 1:
                 if key == "mask":
-                    im = sf.mk_thumb(ds.data)
+                    im = mk_thumb(ds.data)
                 elif key.endswith("INDEX"):
-                    im = sf.mk_thumb(ds.data, mask=self.mask, index_mode=True)
+                    im = mk_thumb(ds.data, mask=self.mask, index_mode=True)
                 else:
-                    im = sf.mk_thumb(ds.data, mask=self.mask)
+                    im = mk_thumb(ds.data, mask=self.mask)
                 ds.thumb = im
 
             elif ds.ext == ".npz":
                 
-                im = sf.mk_thumb(ds.data.data, mask=ds.data.mask)
-                #im = sf.mk_thumb(ds.data)
+                im = mk_thumb(ds.data.data, mask=ds.data.mask)
                 ds.thumb = im
             else:
                 return
@@ -729,7 +731,7 @@ class ProcessedObject:
                 
                 logger.debug(f"Loaded base datasets for {basename}")
                 
-                savgol, savgol_cr, _ = sf.process(cropped)
+                savgol, savgol_cr, _ = process(cropped)
                 po.add_dataset('savgol', savgol, ext='.npy')
                 po.add_dataset('savgol_cr', savgol_cr, ext='.npy')
                 logger.debug(f"Generated savgol and savgol_cr from cropped data")

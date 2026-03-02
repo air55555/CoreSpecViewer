@@ -12,7 +12,10 @@ import logging
 
 import numpy as np
 
-from ..spectral_ops import spectral_functions as sf
+#from ..spectral_ops import spectral_functions as sf
+from ..spectral_ops import IO as io
+from ..spectral_ops.visualisation import get_false_colour
+from ..spectral_ops.processing import process
 from .processed_object import ProcessedObject
 
 logger = logging.getLogger(__name__)
@@ -66,10 +69,10 @@ class RawObject:
     def get_metadata(self):
         """Load and merge Specim XML + ENVI header metadata if available."""
         if 'metadata' in self.files.keys() and 'data head' in self.files.keys():
-            self.metadata = sf.parse_lumo_metadata(self.files['metadata']) | sf.read_envi_header(self.files['data head'])
+            self.metadata = io.parse_lumo_metadata(self.files['metadata']) | io.read_envi_header(self.files['data head'])
             self.sensor = self.metadata['sensor type']
         elif 'metadata' not in self.files.keys() and 'data head' in self.files.keys():
-            self.metadata = sf.read_envi_header(self.files['data head'])
+            self.metadata = io.read_envi_header(self.files['data head'])
             self.sensor = self.metadata['sensor type']
     @property
     def is_raw(self) -> bool:
@@ -156,7 +159,7 @@ class RawObject:
             return self.reflectance
 
         if "fenix" not in self.sensor.lower():
-            self.reflectance, self.bands, self.snr = sf.find_snr_and_reflect(
+            self.reflectance, self.bands, self.snr = io.find_snr_and_reflect(
                 self.files['data head'],
                 self.files['white head'],
                 self.files['dark head'],
@@ -168,9 +171,9 @@ class RawObject:
         else:
             logger.debug(f"length of loaded bands {len(self.metadata['wavelength'])}")
             if len(self.metadata['wavelength']) < 400:
-                self.reflectance, self.bands, self.snr = sf.get_fenix_reflectance(str(self.root_dir), mode='hylite')
+                self.reflectance, self.bands, self.snr = io.get_fenix_reflectance(str(self.root_dir), mode='hylite')
             else:
-                self.reflectance, self.bands, self.snr = sf.get_fenix_reflectance(str(self.root_dir), mode='derived')
+                self.reflectance, self.bands, self.snr = io.get_fenix_reflectance(str(self.root_dir), mode='derived')
     
         return self.reflectance
 
@@ -185,7 +188,7 @@ class RawObject:
             return self.reflectance
         logger.info(f"{(self.sensor.lower())} sensor detected")
         if "fenix" not in self.sensor.lower():
-            self.reflectance, self.bands, self.snr = sf.find_snr_and_reflect(
+            self.reflectance, self.bands, self.snr = io.find_snr_and_reflect(
                 self.files['data head'],
                 self.files['white head'],
                 self.files['dark head'],
@@ -197,15 +200,15 @@ class RawObject:
         else:
             logger.debug(f"length of loaded bands {len(self.metadata['wavelength'])}")
             if len(self.metadata['wavelength']) < 400:
-                self.reflectance, self.bands, self.snr = sf.get_fenix_reflectance(str(self.root_dir), mode='hylite')
+                self.reflectance, self.bands, self.snr = io.get_fenix_reflectance(str(self.root_dir), mode='hylite')
             else:
-                self.reflectance, self.bands, self.snr = sf.get_fenix_reflectance(str(self.root_dir), mode='derived')
+                self.reflectance, self.bands, self.snr = io.get_fenix_reflectance(str(self.root_dir), mode='derived')
     
         return self.reflectance
     def get_false_colour(self, bands=None):
         """Generate a false-colour RGB composite for visualization."""
         if hasattr(self, "reflectance") and self.reflectance is not None:
-            return sf.get_false_colour(self.reflectance, bands=bands)
+            return get_false_colour(self.reflectance, bands=bands)
         
     
     @classmethod  
@@ -473,7 +476,7 @@ class RawObject:
         po.add_dataset('metadata', self.metadata, ext='.json')
         po.add_dataset('cropped', self.reflectance, ext='.npy')
         po.add_dataset('bands', self.bands, ext='.npy')
-        savgol, savgol_cr, mask = sf.process(self.reflectance)
+        savgol, savgol_cr, mask = process(self.reflectance)
         po.add_dataset('savgol', savgol, ext='.npy')
         po.add_dataset('savgol_cr', savgol_cr, ext='.npy')
         po.add_dataset('mask', mask, ext='.npy')
