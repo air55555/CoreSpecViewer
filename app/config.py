@@ -57,5 +57,3 @@ feature_keys = [
     '4000WIDEW', '4470TRUEW', '4500SW', '4500CW',
     '4670W', '4920W', '4000V_NARROWW', '4000shortW', '2950BW'
 ]
-
-

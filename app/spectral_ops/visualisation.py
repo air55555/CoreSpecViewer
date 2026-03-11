@@ -44,6 +44,40 @@ logger = logging.getLogger(__name__)
 my_map = matplotlib.colormaps['viridis']
 my_map.set_bad('black')
 
+DISPLAY_RANGE = {
+    '1400W':  (1387, 1445),
+    '1480W':  (1471, 1491),
+    '1550W':  (1520, 1563),
+    '1760W':  (1751, 1764),
+    '1850W':  (1749, 1949),
+    '1900W':  (1840, 1990), 
+    '2080W':  (1980, 2180), 
+    '2160W':  (2159, 2166),
+    '2200W':  (2185, 2215),
+    '2250W':  (2248, 2268),
+    '2290W':  (2279, 2338), 
+    '2320W':  (2300, 2340),
+    '2350W':  (2320, 2366),
+    '2390W':  (2377, 2406),
+    '2830W':  (2677, 2890),  
+    '2950W':  (2920, 2980),
+    '2950AW': (2900, 2960),
+    '2950BW': (2920, 2990),
+    '3000W':  (2900, 3100),  
+    '3500W':  (3400, 3600),
+    '4000W':  (3930, 4150),
+    '4000WIDEW': (3910, 4150),
+    '4000V_NARROWW': (3930, 4150),
+    '4000shortW': (3850, 4000),
+    '4470TRUEW': (4460, 4490),
+    '4500SW': (4570, 4850),
+    '4500CW': (4625, 4770),
+    '4670W':  (4300, 4800),
+    '4920W':  (4850, 5100),
+    
+}
+
+
 def get_false_colour(array, bands=None):
     """
     spectral.get_rgb(), but guarantees finite output by replacing NaN/Inf with 0.
@@ -233,13 +267,39 @@ def mk_thumb(
             logger.debug(f"[{time.perf_counter() - t0:.4f}s] 2D mode: masked array creation (+{time.perf_counter() - t1:.4f}s)")
             
             t1 = time.perf_counter()
-            amin = np.nanmin(a)
-            amax = np.nanmax(a)
-            logger.debug(f"[{time.perf_counter() - t0:.4f}s] 2D mode: nanmin/nanmax (+{time.perf_counter() - t1:.4f}s)")
+            
+            # Auto-detect appropriate range based on data
+            data_min = np.nanmin(a)
+            data_max = np.nanmax(a)
+            logger.debug(f"======================== Data min {data_min}, Data Max {data_max}============================")
+            logger.debug(f"Number greater than 1: {np.sum(a > 1)}, full size of array: {a.shape[0]*a.shape[1]}")
+            # Check if the vast majority of values are between 0 and 1
+            if data_min >= 0 and np.sum((a.compressed() >= 0) & (a.compressed() <= 1)) >= 0.95 * a.compressed().size:
+                amin, amax = 0.0, 1.0
+                logger.debug("Values in [0,1], using 0-1 stretch")
+                
+            else:
+                # Check if majority of values fall within any known feature position range
+                in_range = False
+                compressed = a.compressed()  # Only non-masked values
+                for range_min, range_max in DISPLAY_RANGE.values():
+                    valid_data = compressed[(compressed >= range_min) & (compressed <= range_max)]
+                    if valid_data.size > 0.7 * compressed.size:  # 70% of valid pixels
+                        amin, amax = range_min, range_max
+                        logger.debug(f"Majority of data in [{range_min}, {range_max}], global feature stretch")
+                        in_range = True
+                        break
+
+                if not in_range:
+                    # Band maths or other - use local stretch
+                    amin, amax = data_min, data_max
+                    logger.debug("Using local stretch")
+            
+            logger.debug(f"[{time.perf_counter() - t0:.4f}s] 2D mode: range determination (+{time.perf_counter() - t1:.4f}s)")
             
             t1 = time.perf_counter()
             if amax > amin:
-                norm = (a - amin) / (amax - amin)
+                norm = np.clip((a - amin) / (amax - amin), 0, 1)
             else:
                 norm = np.zeros_like(a, dtype=float)
             logger.debug(f"[{time.perf_counter() - t0:.4f}s] 2D mode: normalization (+{time.perf_counter() - t1:.4f}s)")
