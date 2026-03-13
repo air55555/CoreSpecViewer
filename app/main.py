@@ -460,15 +460,33 @@ class MainRibbonController(QMainWindow):
             logger.warning(msg)
             QMessageBox.information(self, "Archive", msg)
             return
+        
+        # Check for unsaved temporary datasets
+        if self.cxt.current.has_temps:
+            choice = two_choice_box(
+                'You have unsaved datasets. Save them first?',
+                'Save & Archive',
+                'Archive without saving'
+            )
+            if choice == 'left':  # Save temps first
+                try:
+                    self.cxt.po.commit_temps()
+                    logger.info(f"Committed temporary datasets before archiving {self.cxt.current.basename}")
+                except Exception as e:
+                    logger.error(f"Failed to save temps before archiving", exc_info=True)
+                    QMessageBox.warning(self, "Commit Error", f"Failed to upgrade datasets: {e}")
+                    return
+        
         dest = QFileDialog.getExistingDirectory(self, "Choose save folder", str(self.cxt.current.root_dir))
         if not dest:
             return
+        
         test = two_choice_box('Save product datasets?', 'yes', 'no')
         try:
             if test != 'left':
                 self.cxt.current.save_archive_file(dest)
             else:
-                self.cxt.current.save_archive_file(dest, include_products = True)
+                self.cxt.current.save_archive_file(dest, include_products=True)
         except (KeyError, FileNotFoundError, PermissionError) as e:
             logger.error(f"Failed to archive dataset {self.cxt.current.basename}", exc_info=True)
             QMessageBox.warning(self, "Archive dataset", f"Failed to archive dataset: {e}")
