@@ -172,8 +172,7 @@ def crop_auto(obj):
         return obj
 
     elif isinstance(obj, ProcessedObject):
-        # union of base + temps
-        keys = set(obj.datasets.keys()) | set(obj.temp_datasets.keys())
+        # Detect crop region using savgol
         base = getattr(obj, "savgol", None)
         if not isinstance(base, np.ndarray) or base.ndim < 2 or 0 in base.shape:
             return obj
@@ -192,14 +191,19 @@ def crop_auto(obj):
             return obj
         if not isinstance(test_ref, np.ndarray) or test_ref.ndim < 2 or 0 in test_ref.shape:
             return obj
-        # slicer is valid & non-empty for the reference → now apply per dataset
-        for key in keys:
-            if obj.has_temp(key):
-                src = obj.temp_datasets[key].data
-            else:
-                ds = obj.datasets.get(key)
-                src = getattr(ds, "data", None) if ds else None
-
+        
+        # slicer is valid → apply to all datasets
+        keys = set(obj.datasets.keys()) | set(obj.temp_datasets.keys())
+        
+        # Ensure mask is processed first for thumbnail generation
+        ordered_keys = ['mask'] if 'mask' in keys else []
+        ordered_keys.extend([k for k in keys if k != 'mask'])
+        
+        for key in ordered_keys:
+            logger.info(f"auto-cropping {obj.basename} {key} dataset")
+            
+            src = obj.temp_datasets[key].data if obj.has_temp(key) else obj.datasets[key].data
+            
             if getattr(src, "ndim", 0) <= 1:
                 continue
             try:
@@ -209,13 +213,15 @@ def crop_auto(obj):
             if 0 in cropped.shape:
                 continue
 
-            cropped_copy = np.array(cropped)  # materialise
+            cropped_copy = np.array(cropped)
 
             if obj.has_temp(key):
                 obj.temp_datasets[key].data = cropped_copy
             else:
                 obj.add_temp_dataset(key, cropped_copy)
+        
         return obj
+    
     else:
         raise TypeError(f"Unsupported object type: {type(obj)}")
 

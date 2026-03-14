@@ -426,7 +426,8 @@ class ProcessedObject:
             return
     
     def build_thumb(self, key):
-        
+        if key == "stats":
+            return
         ds = self.temp_datasets.get(key)
         if ds is None:
             ds = self.datasets.get(key)
@@ -451,7 +452,7 @@ class ProcessedObject:
                 return
 
         except ValueError:
-            logger.error(f"ValueError building thumb for {key}")
+            logger.warning(f"ValueError building thumb for {key}")
             return
 
     def build_all_thumbs(self):
