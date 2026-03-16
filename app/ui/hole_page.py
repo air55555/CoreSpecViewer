@@ -46,6 +46,36 @@ from .util_windows import (ClosableWidgetWrapper,
 
 logger = logging.getLogger(__name__)
 
+def format_missing_boxes(present_boxes: list[int], first_box: int, last_box: int) -> str:
+    """Format missing boxes into compact range notation."""
+    if not present_boxes:
+        if first_box == last_box:
+            return f"{first_box} missing"
+        return f"{first_box}-{last_box} missing"
+    
+    present_set = set(present_boxes)
+    missing = [n for n in range(first_box, last_box + 1) if n not in present_set]
+    
+    if not missing:
+        return "All boxes present"
+    
+    ranges = []
+    start = prev = None
+    
+    for n in missing:
+        if start is None:
+            start = prev = n
+        elif n == prev + 1:
+            prev = n
+        else:
+            ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+            start = prev = n
+    
+    if start is not None:
+        ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+    
+    return ", ".join(ranges) + " missing"
+
 class NoSelectionDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         # Remove the State_Selected flag so Qt won't draw highlight
@@ -391,12 +421,15 @@ class HoleControlPanel(QWidget):
         self.lbl_hole_id = QLabel("—")
         self.lbl_box_count = QLabel("—")
         self.lbl_depth_range = QLabel("—")
+        self.lbl_missing_boxes = QLabel("—")
+        self.lbl_missing_boxes.setWordWrap(True)
 
         info_layout = QFormLayout()
         info_layout.setLabelAlignment(Qt.AlignLeft)
         info_layout.addRow("Hole ID:", self.lbl_hole_id)
         info_layout.addRow("# boxes:", self.lbl_box_count)
         info_layout.addRow("Depth range:", self.lbl_depth_range)
+        info_layout.addRow("Missing boxes:", self.lbl_missing_boxes)
         self.layout.addLayout(info_layout)
         separator1 = QFrame(self)
         separator1.setFrameShape(QFrame.HLine)
@@ -627,6 +660,7 @@ class HoleControlPanel(QWidget):
             self.lbl_hole_id.setText("—")
             self.lbl_box_count.setText("—")
             self.lbl_depth_range.setText("—")
+            self.lbl_missing_boxes.setText("—")
             return
 
         self.lbl_hole_id.setText(str(self.cxt.ho.hole_id or "—"))
@@ -655,6 +689,23 @@ class HoleControlPanel(QWidget):
             self.lbl_depth_range.setText(f"{dmin:.2f}–{dmax:.2f} m")
         else:
             self.lbl_depth_range.setText("—")
+
+        # Calculate and display missing boxes
+        present_boxes = sorted([int(i) for i in self.cxt.ho.boxes.keys()])
+        missing_text = format_missing_boxes(
+            present_boxes, 
+            self.cxt.ho.first_box, 
+            self.cxt.ho.last_box
+        )
+
+        # Highlight if there are missing boxes
+        if missing_text == "All boxes present":
+            self.lbl_missing_boxes.setStyleSheet("")
+        else:
+            self.lbl_missing_boxes.setStyleSheet("QLabel { color: #D97706; }")
+
+        self.lbl_missing_boxes.setText(missing_text)
+
         self._set_dataset_keys()
 #-----------Export csv handler-------------------------------------------------------------------
     def export_csv_dialog(self):

@@ -20,15 +20,15 @@ class MaskActions(BaseActions):
         
         self._register_group('Masking', [
             ("button", "Mask all", self.act_mask_all, "Masks all pixels (inverse workflow: unmask what you need)"),
-            ("button", "New mask", lambda: self.act_mask_point('new'), "Creates a blank mask,\n then masks by correlation with selected pixel."),
-            ("button", "Enhance mask", lambda: self.act_mask_point('enhance'), "Adds to existing mask by correlation with selected pixel"),
+            ("button", "New mask", lambda: self.act_mask_point('new'), "Creates a blank mask,\n then masks by correlation with selected pixel.", "Ctrl+W"),
+            ("button", "Enhance mask", lambda: self.act_mask_point('enhance'), "Adds to existing mask by correlation with selected pixel", "Ctrl+E"),
             ("button", "Mask line", lambda: self.act_mask_point('line'), "Adds a masked vertical line to existing mask"),
-            ("button", "Mask region", self.act_mask_rect, "Adds a masked rectangle to existing mask"),
+            ("button", "Mask region", self.act_mask_rect, "Adds a masked rectangle to existing mask", "Ctrl+R"),
             ("menu", "Freehand mask region", [
-                ("Mask inside selected", lambda: self.act_mask_polygon(mode="mask inside"), "With existing mask, masks all pixels inside of selected region"),
-                ("Mask outside selected", lambda: self.act_mask_polygon(mode="mask outside"), "With existing mask, masks all pixels outside of selected region"),
-                ("Unmask inside selected", lambda: self.act_mask_polygon(mode="unmask inside"), "With existing mask, unmasks all pixels inside of selected region"),
-                ("Unmask outside selected", lambda: self.act_mask_polygon(mode="unmask outside"), "With existing mask, unmasks all pixels outside of selected region"),
+                ("Mask inside selected", lambda: self.act_mask_polygon(mode="mask inside"), "With existing mask, masks all pixels inside of selected region", "Ctrl+F"),
+                ("Mask outside selected", lambda: self.act_mask_polygon(mode="mask outside"), "With existing mask, masks all pixels outside of selected region", "Ctrl+Shift+F"),
+                ("Unmask inside selected", lambda: self.act_mask_polygon(mode="unmask inside"), "With existing mask, unmasks all pixels inside of selected region", "Ctrl+A"),
+                ("Unmask outside selected", lambda: self.act_mask_polygon(mode="unmask outside"), "With existing mask, unmasks all pixels outside of selected region", "Ctrl+Shift+A"),
                 
             ]),
             ("button", "Despeckle", self.despeck_mask, "Remove speckles from mask"),

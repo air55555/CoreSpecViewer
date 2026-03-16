@@ -160,8 +160,17 @@ class FlexibleRibbon(QTabWidget):
         return group_widget
     
     def _populate(self, bar: QToolBar, spec):
-        """Populate toolbar with buttons/menus from spec."""
-        # Copy the _populate implementation from Groups/GroupedRibbon
+        """
+        Populate toolbar with buttons/menus from spec.
+        
+        Spec format:
+        ("button", label, callback[, tooltip[, shortcut]])
+        ("menu", label, submenu_list[, tooltip])
+        
+        Where submenu_list contains:
+        (label, callback[, tooltip[, shortcut]])
+        ("menu", label, nested_submenu_list[, tooltip])
+        """
         for entry in spec:
             if not entry:
                 continue
@@ -169,27 +178,48 @@ class FlexibleRibbon(QTabWidget):
             kind = entry[0]
             
             if kind == "button":
-                if len(entry) == 4:
-                    _kind, label, callback, tooltip = entry
-                else:
-                    _kind, label, callback = entry
-                    tooltip = None
+                # Support formats:
+                # ("button", label, callback)
+                # ("button", label, callback, tooltip)
+                # ("button", label, callback, tooltip, shortcut)
+                label = entry[1]
+                callback = entry[2]
+                tooltip = entry[3] if len(entry) > 3 else None
+                shortcut = entry[4] if len(entry) > 4 else None
                 
-                act = QAction(label, bar)
+                # Get the top-level window (MainRibbonController)
+                # Parent actions to it so shortcuts work globally
+                main_window = self.window()
+                parent = main_window if main_window else self
+                
+                act = QAction(label, parent)
                 act.triggered.connect(callback)
-                if tooltip:
+                
+                if shortcut:
+                    act.setShortcut(shortcut)
+                    # Add shortcut to tooltip for discoverability
+                    if tooltip:
+                        act.setToolTip(f"{tooltip} ({shortcut})")
+                        act.setStatusTip(f"{tooltip} ({shortcut})")
+                    else:
+                        act.setToolTip(f"{label} ({shortcut})")
+                        act.setStatusTip(f"{label} ({shortcut})")
+                elif tooltip:
                     act.setToolTip(tooltip)
                     act.setStatusTip(tooltip)
+                
                 bar.addAction(act)
             
             elif kind == "menu":
-                if len(entry) == 4:
-                    _kind, label, submenu, tooltip = entry
-                else:
-                    _kind, label, submenu = entry
-                    tooltip = None
+                # ("menu", label, submenu_list[, tooltip])
+                label = entry[1]
+                submenu = entry[2]
+                tooltip = entry[3] if len(entry) > 3 else None
                 
-                top = QAction(label, bar)
+                main_window = self.window()
+                parent = main_window if main_window else self
+                
+                top = QAction(label, parent)
                 if tooltip:
                     top.setToolTip(tooltip)
                     top.setStatusTip(tooltip)
@@ -198,39 +228,64 @@ class FlexibleRibbon(QTabWidget):
                 self._populate_menu(menu, submenu, bar)
                 top.setMenu(menu)
                 bar.addAction(top)
-    
+
     def _populate_menu(self, menu: QMenu, items, bar: QToolBar):
-        """Recursively populate a QMenu."""
+        """
+        Recursively populate a QMenu with items.
+        
+        Items can be:
+        (label, callback[, tooltip[, shortcut]])
+        ("menu", label, submenu_list[, tooltip])
+        """
         for item in items:
             if not item:
                 continue
             
+            # Check if this is a nested menu
             if item[0] == "menu":
-                if len(item) == 4:
-                    _kind, label, submenu_items, tooltip = item
-                else:
-                    _kind, label, submenu_items = item
-                    tooltip = None
+                # ("menu", label, submenu_list[, tooltip])
+                label = item[1]
+                submenu_items = item[2]
+                tooltip = item[3] if len(item) > 3 else None
                 
                 submenu = QMenu(label, menu)
                 if tooltip:
                     submenu.setToolTip(tooltip)
                     submenu.setStatusTip(tooltip)
                 
+                # Recursively populate the submenu
                 self._populate_menu(submenu, submenu_items, bar)
                 menu.addMenu(submenu)
+            
             else:
-                if len(item) == 3:
-                    label, callback, tooltip = item
-                else:
-                    label, callback = item
-                    tooltip = None
+                # Regular menu item (action)
+                # Support: (label, callback), (label, callback, tooltip), 
+                #          (label, callback, tooltip, shortcut)
+                label = item[0]
+                callback = item[1]
+                tooltip = item[2] if len(item) > 2 else None
+                shortcut = item[3] if len(item) > 3 else None
+
+                # Get the top-level window for global shortcuts
+                main_window = self.window()
+                parent = main_window if main_window else self
                 
-                action = QAction(label, bar)
+                action = QAction(label, parent)
                 action.triggered.connect(callback)
-                if tooltip:
+                
+                if shortcut:
+                    action.setShortcut(shortcut)
+                    # Add shortcut to tooltip for discoverability
+                    if tooltip:
+                        action.setToolTip(f"{tooltip} ({shortcut})")
+                        action.setStatusTip(f"{tooltip} ({shortcut})")
+                    else:
+                        action.setToolTip(f"{label} ({shortcut})")
+                        action.setStatusTip(f"{label} ({shortcut})")
+                elif tooltip:
                     action.setToolTip(tooltip)
                     action.setStatusTip(tooltip)
+                
                 menu.addAction(action)
     
     def add_global_actions(self, perm_act_list, pos='left'):
