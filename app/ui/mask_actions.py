@@ -35,7 +35,8 @@ class MaskActions(BaseActions):
             ("button", "Improve", self.act_mask_improve, "Heuristically improves the mask"),
             ("button", "Invert mask", self.act_invert_mask, "Inverts mask: masked ↔ unmasked"),
             ("button", "Calc stats", self.act_mask_calc_stats, "Calculates connected components used for downhole unwrapping"),
-            ("button", "unwrap preview", self.unwrap, 'Produces "unwrapped" coreboxes by vertical concatenation: Right→Left, Top→Bottom')
+            ("button", "unwrap preview", self.unwrap, 'Produces "unwrapped" coreboxes by vertical concatenation: Right→Left, Top→Bottom'),
+            ("button", "re-generate thumbs (slow)", self.re_thumb, 'Regenerates all thumbnail images. Slow process, but shouldnt be needed often')
         ])
     
     # -------- MASK actions --------
@@ -170,3 +171,15 @@ class MaskActions(BaseActions):
             self.cxt.current = t.unwrapped_output(self.cxt.current)
         logger.info(f"{self.cxt.current.basename} unwrapped using connected components stats")
         self.controller.refresh()
+
+    
+    def re_thumb(self):
+        logger.info(f"Button clicked: Regenerate Thumbs")
+        valid_state, msg = self.cxt.requires(self.cxt.PROCESSED)
+        if not valid_state:
+            logger.warning(msg)
+            self._show_error("thumbnails", msg)
+            return
+        with busy_cursor('unwrapping...', self.controller):
+            self.cxt.po.build_all_thumbs()
+
