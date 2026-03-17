@@ -17,7 +17,8 @@ dependencies = [
     "opencv-python>=4.8",
     "spectral>=0.23",
     "hylite>=1.36",
-    "gfit>=0.2"
+    "gfit>=0.2",
+    "reportlab>4.0"
 ]
 
 [project.scripts]

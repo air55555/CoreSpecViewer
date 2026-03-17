@@ -10,6 +10,7 @@ dependencies:
   - pyqt=5.15.10
   - opencv
   - spectral
+  - reportlab
   - pip
   - pip:
       - hylite

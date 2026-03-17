@@ -1,0 +1,504 @@
+"""
+PDF Booklet Export for HoleObject.
+ 
+Creates an A4 PDF booklet with:
+- Title page with hole metadata (portrait)
+- One page per box per selected dataset key (landscape)
+- Overview pages at the end showing concatenated images for each feature (portrait)
+ 
+Uses reportlab for PDF generation.
+"""
+from io import BytesIO
+import logging
+from pathlib import Path
+from datetime import datetime
+import numpy as np
+from PIL import Image
+ 
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.units import inch, cm
+from reportlab.pdfgen import canvas as pdf_canvas
+from reportlab.lib.utils import ImageReader
+import matplotlib
+
+from ..spectral_ops.visualisation import mk_thumb, DISPLAY_RANGE
+from ..models.hole_object import HoleObject
+from ..ui.display_text import gen_display_text
+
+logger = logging.getLogger(__name__)
+
+def format_missing_boxes(present_boxes: list[int], first_box: int, last_box: int) -> str:
+    """Format missing boxes into compact range notation."""
+    if not present_boxes:
+        if first_box == last_box:
+            return f"{first_box} missing"
+        return f"{first_box}-{last_box} missing"
+    
+    present_set = set(present_boxes)
+    missing = [n for n in range(first_box, last_box + 1) if n not in present_set]
+    
+    if not missing:
+        return "All boxes present"
+    
+    ranges = []
+    start = prev = None
+    
+    for n in missing:
+        if start is None:
+            start = prev = n
+        elif n == prev + 1:
+            prev = n
+        else:
+            ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+            start = prev = n
+    
+    if start is not None:
+        ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+    
+    return ", ".join(ranges) + " missing"
+
+
+def create_hole_pdf_booklet(
+    hole: HoleObject,
+    selected_keys: list[str],
+    output_path: Path | str,
+) -> Path:
+    """
+    Create a PDF booklet for a drill hole with selected dataset visualizations.
+    
+    Parameters
+    ----------
+    hole : HoleObject
+        The hole object containing all boxes
+    selected_keys : list[str]
+        Dataset keys to include (must be present in all boxes)
+    output_path : Path | str
+        Path where the PDF should be saved
+        
+    Returns
+    -------
+    Path
+        Path to the created PDF file
+        
+    Raises
+    ------
+    ValueError
+        If selected_keys contains keys not present in all boxes
+        
+    Notes
+    -----
+    PDF structure:
+    1. Title page with hole metadata (portrait)
+    2. One page per box per selected key (landscape)
+    3. Overview pages showing all boxes concatenated for each key (portrait)
+    """
+    output_path = Path(output_path)
+    
+    # Validate that all keys are present in all boxes
+    for key in selected_keys:
+        if not hole.check_for_all_keys(key):
+            raise ValueError(f"Key '{key}' is not present in all boxes")
+    
+    logger.info(f"Creating PDF booklet for hole {hole.hole_id} with {len(selected_keys)} keys")
+    
+    # Create canvas for manual page building
+    c = pdf_canvas.Canvas(str(output_path), pagesize=A4)
+    
+    # ========================================================================
+    # 1. TITLE PAGE (Portrait)
+    # ========================================================================
+    _build_title_page(c, hole, selected_keys)
+    c.showPage()
+    
+    # ========================================================================
+    # 2. BOX PAGES (Landscape)
+    # ========================================================================
+    logger.info(f"Generating {hole.num_box * len(selected_keys)} box pages...")
+    for key in selected_keys:
+        for po in hole:
+        
+            c.setPageSize(landscape(A4))
+            _build_box_page(c, po, key)
+            c.showPage()
+    
+    # ========================================================================
+    # 3. OVERVIEW PAGES (Portrait)
+    # ========================================================================
+    logger.info(f"Generating {len(selected_keys)} overview pages...")
+    for key in selected_keys:
+        c.setPageSize(A4)
+        _build_overview_page(c, hole, key)
+        c.showPage()
+    
+    # Save PDF
+    c.save()
+    logger.info(f"PDF booklet created successfully: {output_path}")
+    return output_path
+
+
+def _build_title_page(c, hole, selected_keys):
+    """Build title page on canvas (portrait)."""
+    width, height = A4
+    margin = 1.5 * cm
+    
+    # Title
+    c.setFont("Helvetica-Bold", 24)
+    c.drawCentredString(width/2, height - 2*inch, f"Drill Hole Report: {hole.hole_id}")
+    
+    # Metadata
+    c.setFont("Helvetica", 11)
+    y = height - 2.8*inch
+    
+    # Collect metadata
+    starts, stops = [], []
+    for meta in hole.hole_meta.values():
+        try:
+            s = float(meta.get("core depth start", "nan"))
+            if np.isfinite(s): starts.append(s)
+        except: pass
+        try:
+            e = float(meta.get("core depth stop", "nan"))
+            if np.isfinite(e): stops.append(e)
+        except: pass
+    
+    # Build metadata lines
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin, y, "Hole ID:")
+    c.setFont("Helvetica", 11)
+    c.drawString(margin + 100, y, str(hole.hole_id))
+    y -= 20
+    
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin, y, "Number of Boxes:")
+    c.setFont("Helvetica", 11)
+    c.drawString(margin + 100, y, str(hole.num_box))
+    y -= 20
+    
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin, y, "Box Range:")
+    c.setFont("Helvetica", 11)
+    c.drawString(margin + 100, y, f"{hole.first_box} to {hole.last_box}")
+    y -= 20
+    
+    if starts and stops:
+        dmin, dmax = min(starts), max(stops)
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(margin, y, "Depth Range:")
+        c.setFont("Helvetica", 11)
+        c.drawString(margin + 100, y, f"{dmin:.2f}m to {dmax:.2f}m")
+        y -= 20
+        
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(margin, y, "Total Depth:")
+        c.setFont("Helvetica", 11)
+        c.drawString(margin + 100, y, f"{dmax - dmin:.2f}m")
+        y -= 20
+    
+    # Missing boxes
+    present_boxes = sorted([int(i) for i in hole.boxes.keys()])
+    missing_text = format_missing_boxes(present_boxes, hole.first_box, hole.last_box)
+    if missing_text != "All boxes present":
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(margin, y, "Missing boxes:")
+        c.setFont("Helvetica", 11)
+        c.drawString(margin + 100, y, missing_text)
+        y -= 20
+    
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin, y, "Report Generated:")
+    c.setFont("Helvetica", 11)
+    c.drawString(margin + 100, y, datetime.now().strftime('%Y-%m-%d %H:%M'))
+    y -= 20
+    
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin, y, "Datasets Included:")
+    c.setFont("Helvetica", 11)
+    c.drawString(margin + 100, y, str(len(selected_keys)))
+    y -= 30
+    
+    # Dataset list
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin, y, "Dataset List:")
+    y -= 20
+    c.setFont("Helvetica", 10)
+    for key in selected_keys:
+        c.drawString(margin + 20, y, gen_display_text(key))
+        y -= 15
+
+
+def _build_box_page(c, po, key):
+    """Build box page on canvas (landscape)."""
+    width, height = landscape(A4)
+    margin = 1.5 * cm
+    
+    box_num = po.metadata.get('box number', 'Unknown')
+    box_depth_start = po.metadata.get('core depth start', 'N/A')
+    box_depth_stop = po.metadata.get('core depth stop', 'N/A')
+    
+    # Heading
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(margin, height - margin - 20, f"Box {box_num} - {gen_display_text(key)}")
+    
+    # Metadata
+    c.setFont("Helvetica", 11)
+    c.drawString(margin, height - margin - 40, f"Depth: {box_depth_start}m to {box_depth_stop}m")
+    
+    # Image
+    try:
+        img_pil = _generate_box_image(po, key)
+        
+        img_buffer = BytesIO()
+        img_pil.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        
+        available_width = width - 2 * margin
+        available_height = height - 2 * margin - 0.8*inch
+        
+        img_width, img_height = img_pil.size
+        scale = min(available_width / img_width, available_height / img_height, 1.0)
+        
+        display_width = img_width * scale
+        display_height = img_height * scale
+        
+        # Center the image
+        x = (width - display_width) / 2
+        y = height - margin - 0.8*inch - display_height
+        c.drawImage(ImageReader(img_buffer), x, y, width=display_width, height=display_height)
+        if key.endswith("INDEX"):
+            legend_key = key.replace("INDEX", "LEGEND")
+            legend_ds = po.temp_datasets.get(legend_key) or po.datasets.get(legend_key)
+            if legend_ds and legend_ds.data:
+                _draw_legend(c, legend_ds.data, img_pil, x + display_width + 10, y, display_height)
+        logger.debug(f"Added image for Box {box_num}, key={key}")
+        if not key.endswith("INDEX"):
+            ds = po.temp_datasets.get(key) or po.datasets.get(key)
+            if ds and ds.data is not None:
+                _draw_colorbar(c, ds.data, po.mask, x + display_width + 10, y, display_height)
+        
+    except Exception as e:
+        logger.error(f"Failed to generate image for Box {box_num}, key={key}: {e}", exc_info=True)
+        c.setFont("Helvetica-Oblique", 11)
+        c.drawString(margin, height/2, f"Error generating image: {e}")
+
+
+def _build_overview_page(c, hole, key):
+    """Build overview page on canvas (portrait)."""
+    width, height = A4
+    margin = 1.5 * cm
+    
+    # Heading
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(margin, height - margin - 20, f"Overview: {gen_display_text(key)} - All Boxes")
+    
+    # Concatenated image
+    try:
+        concat_img = _generate_concatenated_overview(hole, key)
+        
+        img_buffer = BytesIO()
+        concat_img.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        
+        available_width = width - 2 * margin
+        available_height = height - 2 * margin - 0.8*inch
+        
+        img_width, img_height = concat_img.size
+        scale = min(available_width / img_width, available_height / img_height, 1.0)
+        
+        display_width = img_width * scale
+        display_height = img_height * scale
+        
+        # Center horizontally
+        x = (width - display_width) / 2
+        y = height - margin - 0.8*inch - display_height
+
+        c.drawImage(ImageReader(img_buffer), x, y, width=display_width, height=display_height)
+        if key.endswith("INDEX"):
+            # Get legend from first box (they should all be the same)
+            legend_key = key.replace("INDEX", "LEGEND")
+            first_box = list(hole.boxes.values())[0]
+            legend_ds = first_box.temp_datasets.get(legend_key) or first_box.datasets.get(legend_key)
+            if legend_ds and legend_ds.data:
+                _draw_legend(c, legend_ds.data, concat_img, x, y, display_width)
+        else:
+            # For colorbar, get data from first box
+            first_box = list(hole.boxes.values())[0]
+            ds = first_box.temp_datasets.get(key) or first_box.datasets.get(key)
+            mask = first_box.mask if first_box.has('mask') else None
+            if ds and ds.data is not None:
+                _draw_colorbar(c, ds.data, mask, x, y, display_width)
+        logger.debug(f"Added overview for key={key}")
+        
+    except Exception as e:
+        logger.error(f"Failed to generate overview for key={key}: {e}", exc_info=True)
+        c.setFont("Helvetica-Oblique", 11)
+        c.drawString(margin, height/2, f"Error generating overview: {e}")
+
+
+def _generate_box_image(po, key: str) -> Image.Image:
+    """Generate full-resolution image for box page."""
+    ds = po.temp_datasets.get(key) or po.datasets.get(key)
+    if ds is None:
+        raise ValueError(f"Dataset key '{key}' not found in box {po.basename}")
+    
+    if ds.ext == ".npy" and getattr(ds.data, "ndim", 0) > 1:
+        if key == "mask":
+            return mk_thumb(ds.data, resize=False)
+        elif key.endswith("INDEX"):
+            return mk_thumb(ds.data, mask=po.mask, index_mode=True, resize=False)
+        else:
+            return mk_thumb(ds.data, mask=po.mask, resize=False)
+    elif ds.ext == ".npz":
+        return mk_thumb(ds.data.data, mask=ds.data.mask, resize=False)
+    else:
+        raise ValueError(f"Cannot generate image for dataset type {ds.ext}")
+    
+
+def _generate_concatenated_overview(hole: HoleObject, key: str) -> Image.Image:
+    """
+    Generate a concatenated overview image for a specific key across all boxes.
+    
+    All boxes are concatenated vertically in box number order using cached thumbnails.
+    """
+    images = []
+    
+    # Get thumbnail for each box
+    for po in hole:
+        ds = po.temp_datasets.get(key) or po.datasets.get(key)
+        if ds is None or ds.thumb is None:
+            logger.warning(f"Skipping box {po.basename} - no thumbnail for key '{key}'")
+            continue
+        images.append(ds.thumb)
+    
+    if not images:
+        raise ValueError(f"No thumbnails available for key '{key}'. Run 'Generate Images' first.")
+    
+    # Concatenate vertically
+    widths = [img.width for img in images]
+    heights = [img.height for img in images]
+    max_width = max(widths)
+    total_height = sum(heights)
+    
+    concatenated = Image.new('RGB', (max_width, total_height))
+    
+    y_offset = 0
+    for img in images:
+        x_offset = (max_width - img.width) // 2
+        concatenated.paste(img, (x_offset, y_offset))
+        y_offset += img.height
+    
+    return concatenated
+
+def _draw_legend(c, legend: list[dict], img_data, x_start, y_bottom, width):
+    """Draw horizontal legend for INDEX datasets below image, wrapping to multiple rows."""
+       
+    # Get colors from tab20
+    cmap = matplotlib.colormaps.get("tab20") or matplotlib.colormaps["tab10"]
+    
+    # Build index to label mapping
+    idx_to_label = {}
+    for row in legend or []:
+        try:
+            idx = int(row.get("index"))
+            lab = str(row.get("label", f"class {idx}"))
+            idx_to_label[idx] = lab
+        except:
+            continue
+    
+    if not idx_to_label:
+        return
+    
+    # Layout parameters
+    page_width, _ = landscape(A4)
+    margin = 1.5 * cm
+    available_width = page_width - (2 * margin)
+    
+    box_size = 12
+    text_gap = 3
+    
+    # Calculate item width based on longest label
+    c.setFont("Helvetica", 7)
+    max_text_width = max([c.stringWidth(label, "Helvetica", 7) for label in idx_to_label.values()])
+    item_width = box_size + text_gap + max_text_width + 10  # box + gap + text + padding
+    items_per_row = max(1, int(available_width / item_width))
+    row_height = 18  # Vertical spacing between rows
+    
+    x_start_pos = margin
+    y_start_pos = y_bottom - 30
+    
+    row = 0
+    col = 0
+    
+    for idx in sorted(idx_to_label.keys()):
+        # Calculate position
+        x = x_start_pos + (col * item_width)
+        y = y_start_pos - (row * row_height)
+        
+        # Draw color box
+        color = cmap(idx % 20)[:3]
+        c.setFillColorRGB(color[0], color[1], color[2])
+        c.rect(x, y, box_size, box_size, fill=1, stroke=1)
+        
+        # Draw label
+        c.setFillColorRGB(0, 0, 0)
+        label = idx_to_label[idx]
+        c.drawString(x + box_size + text_gap, y + 2, label)
+        
+        # Move to next position
+        col += 1
+        if col >= items_per_row:
+            col = 0
+            row += 1
+
+
+def _draw_colorbar(c, data, mask, x_start, y_bottom, width):
+    """Draw horizontal colorbar for continuous data below image."""
+    # Determine stretch range (same logic as mk_thumb)
+    if mask is not None:
+        a = np.ma.masked_array(data, mask=mask).astype(float)
+    else:
+        a = np.ma.array(data, dtype=float)
+    
+    data_min = np.nanmin(a)
+    data_max = np.nanmax(a)
+    
+    # Detect range type
+    if data_min >= 0 and np.sum((a.compressed() >= 0) & (a.compressed() <= 1)) >= 0.95 * a.compressed().size:
+        amin, amax = 0.0, 1.0
+    else:
+        in_range = False
+        compressed = a.compressed()
+        for range_min, range_max in DISPLAY_RANGE.values():
+            valid_data = compressed[(compressed >= range_min) & (compressed <= range_max)]
+            if valid_data.size > 0.7 * compressed.size:
+                amin, amax = range_min, range_max
+                in_range = True
+                break
+        if not in_range:
+            amin, amax = data_min, data_max
+    
+    # Draw horizontal colorbar
+    my_map = matplotlib.colormaps['viridis']
+    bar_height = 15
+    bar_width = 300
+    
+    margin = 1.5 * cm
+    x_bar = margin + 20  # Start in from left margin
+    y_pos = y_bottom - 35
+    num_steps = 100
+    step_width = bar_width / num_steps
+    
+    for i in range(num_steps):
+        val = i / num_steps
+        color = my_map(val)[:3]
+        c.setFillColorRGB(color[0], color[1], color[2])
+        c.rect(x_bar + i * step_width, y_pos, step_width, bar_height, fill=1, stroke=0)
+    
+    # Draw border
+    c.setStrokeColorRGB(0, 0, 0)
+    c.rect(x_bar, y_pos, bar_width, bar_height, fill=0, stroke=1)
+    
+    # Draw labels below the colorbar
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawString(x_bar, y_pos - 12, f"{amin:.0f}")
+    c.drawRightString(x_bar + bar_width, y_pos - 12, f"{amax:.0f}")

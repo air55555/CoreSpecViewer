@@ -570,6 +570,10 @@ class HoleControlPanel(QWidget):
         export_csv_button.clicked.connect(self.export_csv_dialog)
         export_layout.addWidget(export_csv_button)
         
+        btn_export_pdf = QPushButton("Export PDF Report")
+        btn_export_pdf.clicked.connect(self.export_pdf_booklet)
+        export_layout.addWidget(btn_export_pdf)
+
         self.layout.addWidget(export_block)
         # END NEW
         
@@ -744,6 +748,18 @@ class HoleControlPanel(QWidget):
         logger.info(f"Successfully exported {gen_display_text(key)} for {self.cxt.ho.hole_id}")
         QMessageBox.information(self, "Exported", f"Successfully exported {gen_display_text(key)} for {self.cxt.ho.hole_id}")
         
+
+    def export_pdf_booklet(self):
+        """Open dialog to export PDF booklet."""
+        from ..create_report.report_dialogue import PDFExportDialog
+        
+        valid_state, msg = self.cxt.requires(self.cxt.HOLE)
+        if not valid_state:
+            QMessageBox.warning(self, "Export PDF Booklet", msg)
+            return
+        
+        dialog = PDFExportDialog(self.cxt, parent=self)
+        dialog.exec_()
 
 # ---------downhole data control handlers---------------------------------------------------------
     def _on_display_btn_clicked(self):
