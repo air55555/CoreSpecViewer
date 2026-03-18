@@ -344,7 +344,13 @@ class PDFExportDialog(QDialog):
             )
             logger.info(f"PDF booklet exported to {pdf_path}")
             super().accept()
-            
+        except (ImportError, ModuleNotFoundError) as e:
+            logger.error(f"Failed to create PDF booklet, missing dependency", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Additional dependency required for report creation. Please update environment from the environment.yml"
+            )
         except Exception as e:
             logger.error(f"Failed to create PDF booklet: {e}", exc_info=True)
             QMessageBox.critical(
