@@ -181,5 +181,5 @@ class MaskActions(BaseActions):
             self._show_error("thumbnails", msg)
             return
         with busy_cursor('unwrapping...', self.controller):
-            self.cxt.po.build_all_thumbs()
+            self.cxt.po.build_all_thumbs(force=True)
 

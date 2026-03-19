@@ -94,7 +94,7 @@ class HoleBoxTable(QTableWidget):
     - Intended to be used as a vertical "strip" log, often synchronized with other tables.
     """
 
-    def __init__(self, page: "HolePage", parent=None, columns=None, dataset_key='savgol'):
+    def __init__(self, page: "HolePage", parent=None, columns=None, dataset_key='display'):
         self.columns = columns or ["box", "thumb"]
         self._page = page
         self.dataset_key = dataset_key
@@ -293,9 +293,9 @@ class HoleBoxTable(QTableWidget):
             # Display text in the UI, raw key in UserRole (via userData)
             combo.addItem(gen_display_text(raw_key), raw_key)
 
-        base_whitelist = {"savgol", "savgol_cr", "mask", "segments", "cropped"}
+        base_whitelist = {"display", "mask", "segments", }
         unwrap_prefixes = ("Dhole",)  # DholeAverage, DholeMask, DholeDepths
-        non_vis_suff = {'LEGEND', 'CLUSTERS', "stats", "bands", 'metadata', "display" }
+        non_vis_suff = {'LEGEND', 'CLUSTERS', "stats", "bands", 'metadata', "savgol", "savgol_cr", "cropped" }
         base = []
         unwrapped = []
         products = []
@@ -615,9 +615,9 @@ class HoleControlPanel(QWidget):
             
         if keys:
             combo = self.secondary_combo
-            base_whitelist = {"savgol", "savgol_cr", "mask", "segments", "cropped"}
+            base_whitelist = {"display", "mask", "segments"}
             unwrap_prefixes = ("Dhole",)  # DholeAverage, DholeMask, DholeDepths
-            non_vis_suff = {'LEGEND', 'CLUSTERS', "stats", "bands", 'metadata' }
+            non_vis_suff = {'LEGEND', 'CLUSTERS', "stats", "bands", 'metadata',"savgol", "savgol_cr" , "cropped"}
             base = []
             unwrapped = []
             products = []

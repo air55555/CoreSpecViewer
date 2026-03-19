@@ -153,12 +153,13 @@ class HoleActions(BaseActions):
             logger.warning(msg)
             self._show_error("Save hole", msg)
             return
-        with busy_cursor('Saving.....', self.controller):
+        with busy_cursor('Saving.....', self.controller) as progress:
             self.cxt.ho.save_product_datasets()
             
             for po in self.cxt.ho:
                 po.save_all_thumbs()
                 if po.has_temps:
+                    progress.set(f"Saving {po.metadata['box number']} box number")
                     logger.info(f"{po.metadata['box number']} box number")
                     po.commit_temps()
                     po.save_all()

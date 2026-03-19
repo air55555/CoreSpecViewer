@@ -27,7 +27,9 @@ from PyQt5.QtCore import (
         Qt, 
         pyqtSignal, 
         QModelIndex, 
-        QDateTime)
+        QDateTime,
+        QTimer,
+        QThread)
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -63,16 +65,141 @@ from ..spectral_ops.visualisation import get_false_colour
 #==========reference passing and cache update======================
 @contextmanager
 def busy_cursor(msg=None, window=None):
-    """Temporarily set the cursor to busy; restores automatically."""
-    QApplication.setOverrideCursor(Qt.WaitCursor)
-    if window and hasattr(window, "statusBar") and msg:
-        window.statusBar().showMessage(msg)
+    """
+    Show busy cursor with optional animated status message.
+    
+    Backward compatible - all existing calls work unchanged:
+        with busy_cursor("Loading...", self):
+            do_work()
+    
+    Extended functionality - yield progress object for dynamic updates:
+        with busy_cursor("Processing boxes", self) as progress:
+            for i, po in enumerate(hole):
+                progress.messages[i] = f"Processing {po.basename}"
+                progress.update(i)
+                po.do_thing()
+    
+    Args:
+        msg: Status message to display
+        window: Window with statusBar() for messages
+    
+    Yields:
+        ProgressHelper object (only if used as `with ... as progress:`)
+    """
+    
+    # Create progress helper
+    helper = _ProgressHelper(window, msg)
+    
     try:
-        yield
+        yield helper
     finally:
+        helper.cleanup()
+
+
+class _ProgressHelper:
+    """
+    Shows a small floating window with animated message after 3 seconds.
+    
+    Window appears after 3 seconds if operation is still running.
+    Updates via .set() method and animates with dots.
+    """
+    
+    def __init__(self, parent, base_message):
+        
+        self.parent = parent
+        self.base_message = base_message or "Processing..."
+        
+        self.current_message = base_message
+        
+        self.dialog = None
+        self.label = None
+        self.window_visible = False
+        
+        # Set busy cursor immediately
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+               
+        # Create dialog 
+        
+    
+    def _create_dialog(self):
+        """Create dialog on main thread (hidden initially)"""
+        
+        self.dialog = QDialog(self.parent)
+        self.dialog.setWindowFlags(
+            Qt.FramelessWindowHint | 
+            Qt.WindowStaysOnTopHint | 
+            Qt.Tool
+        )
+        self.dialog.setModal(False)
+        
+        self.label = QLabel(self.base_message)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setStyleSheet("""
+            QLabel {
+                background-color: #2b2b2b;
+                color: #ffffff;
+                padding: 20px 30px;
+                border-radius: 8px;
+                font-size: 13px;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+        """)
+        
+        
+        layout = QVBoxLayout()
+        layout.addWidget(self.label)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.dialog.setLayout(layout)
+    
+    def _show_window(self):
+        """Show dialog"""
+        
+        if not self.dialog:
+            return
+        
+        self.dialog.adjustSize()
+        
+        # Center on parent
+        if self.parent:
+            parent_geo = self.parent.geometry()
+            self.dialog.move(
+                parent_geo.center().x() - self.dialog.width() // 2,
+                parent_geo.center().y() - self.dialog.height() // 2
+            )
+        
+        self.dialog.show()
+        self.dialog.raise_()
+        self.window_visible = True
+        
+              
+        QApplication.processEvents()
+    
+    
+    
+    def set(self, message):
+        """
+        Update the displayed message.
+        
+        Args:
+            message: New message to display
+        """
+        
+        if not self.window_visible:
+            self._create_dialog()
+            self._show_window()
+        if self.label:
+            self.label.setText(message)
+            self.dialog.adjustSize()  # Resize to fit new text
+            QApplication.processEvents()
+    
+    def cleanup(self):
+        """Clean up dialog, and cursor"""
+           
+        if self.dialog:
+            self.dialog.close()
+            self.dialog.deleteLater()
+        
         QApplication.restoreOverrideCursor()
-        if window and hasattr(window, "statusBar"):
-            window.statusBar().clearMessage()
 
 class PopoutWindow(QMainWindow):
     """

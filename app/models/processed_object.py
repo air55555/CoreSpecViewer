@@ -218,6 +218,7 @@ class ProcessedObject:
         rgb_uint8 = (rgb * 255).astype(np.uint8)
         
         self.add_dataset("display", rgb_uint8, ext=".npy") 
+        self.build_thumb("display")
 
 
 
@@ -455,9 +456,14 @@ class ProcessedObject:
             logger.warning(f"ValueError building thumb for {key}")
             return
 
-    def build_all_thumbs(self):
+    def build_all_thumbs(self, force=False):
         """Build thumbnails for all thumbnail-able datasets."""
+        skip_keys = {'cropped', 'savgol', 'savgol_cr'}
         for key in self.datasets.keys()|self.temp_datasets.keys():
+            if not force:
+                if key in skip_keys:
+                    logger.debug(f"Skipping thumbnail for {key} (use display instead)")
+                    continue
             try:
                 self.build_thumb(key)
             except Exception:

@@ -52,13 +52,15 @@ class BoxOperations:
             self._show_error("Feature Extraction", msg)
             return
         if multi:
-            with busy_cursor(f'feature extraction {key}....', self.controller):
+            with busy_cursor(f'feature extraction {key}....', self.controller) as progress:
                 for po in self.cxt.ho:
+                    progress.set(f"Extracting feature {key} for {po.basename}")
                     t.run_feature_extraction(po, key)
                     po.commit_temps()
                     po.save_all()
                     po.reload_all()
                     po.load_thumbs()
+                    
                     logger.info(f"Extract feature {key} for {po.basename} done")
                 
                 self.controller.refresh()
@@ -86,8 +88,9 @@ class BoxOperations:
             return
         if multi:
             logger.info(f"Correlation is using collection {name} in multi mode")
-            with busy_cursor('correlation...', self.controller):
+            with busy_cursor('correlation...', self.controller) as progress:
                 for po in self.cxt.ho:
+                    progress.set(f"Pearson with collection {name} for {po.basename}")
                     t.wta_min_map(po, exemplars, name)
                     po.commit_temps()
                     po.save_all()
@@ -122,8 +125,9 @@ class BoxOperations:
             return
         if multi:
             logger.info(f"Correlation is using collection {name} in multi mode")
-            with busy_cursor('correlation...', self.controller):
+            with busy_cursor('correlation...', self.controller) as progress:
                 for po in self.cxt.ho:
+                    progress.set("SAM with collection {name} for {po.basename}")
                     t.wta_min_map_SAM(po, exemplars, name)
                     po.commit_temps()
                     po.save_all()
@@ -156,8 +160,9 @@ class BoxOperations:
             return
         if multi:
             logger.info(f"Correlation is using collection {name} in multi mode")
-            with busy_cursor('correlation...', self.controller):
+            with busy_cursor('correlation...', self.controller) as progress:
                 for po in self.cxt.ho:
+                    progress.set(f"MSAM with collection {name} for {po.basename}")
                     t.wta_min_map_MSAM(po, exemplars, name)
                     po.commit_temps()
                     po.save_all()
@@ -196,8 +201,9 @@ class BoxOperations:
         if multi:
             
             logger.info(f"Correlation is using {mode} and collection {name} in multibox mode")
-            with busy_cursor('correlation...', self.controller):
+            with busy_cursor('correlation...', self.controller) as progress:
                 for po in self.cxt.ho:
+                    progress.set(f"Multirange with collection {name} using {mode} for {po.basename}")
                     t.wta_multi_range_minmap(po, exemplars, name, mode=mode)
                     po.commit_temps()
                     po.save_all()
@@ -246,9 +252,10 @@ class BoxOperations:
             return
         if multi:
             logger.info(f"Correlation is using {mode}, collection {name} and range ({start_nm}:{stop_nm}) in multibox mode")
-            with busy_cursor('correlation...', self.controller):
+            with busy_cursor('correlation...', self.controller) as progress:
                 for po in self.cxt.ho:
                     try:
+                        progress.set(f"Defined range correlation with collection {name} using {mode} and range ({start_nm}:{stop_nm}) for {po.basename}")
                         t.wta_min_map_user_defined(po, exemplars, name, [start_nm, stop_nm], mode=mode)
                         po.commit_temps()
                         po.save_all()
@@ -291,8 +298,9 @@ class BoxOperations:
             return
         if multi:
             logger.info(f"Clustering started using clusters {clusters} and iters {iters} mutlti box")
-            with busy_cursor('clustering...', self.controller):
+            with busy_cursor('Clustering...', self.controller) as progress:
                 for po in self.cxt.ho:
+                    progress.set(f"Clustering ({clusters}, {iters}) for {po.basename}")
                     t.kmeans_caller(po, clusters, iters)
                     po.commit_temps()
                     po.save_all()
@@ -331,8 +339,9 @@ class BoxOperations:
             return
         if multi:
             logger.info(f"Band Maths started using {expr} mutlti box")
-            with busy_cursor('clustering...', self.controller):
+            with busy_cursor('clustering...', self.controller) as progress:
                 for po in self.cxt.ho:
+                    progress.set(f"Band maths operation using {expr} for {self.cxt.current.basename} evaluating on CR = {cr}")
                     t.band_math_interface(po, name, expr, cr=cr) 
                     po.commit_temps()
                     po.save_all()
@@ -359,9 +368,10 @@ class BoxOperations:
             self._show_error("Generate Images", msg)
             return
         if multi:
-            with busy_cursor("Exporting jpgs....", self.controller):
+            with busy_cursor("Exporting jpgs....", self.controller) as progress:
                 for po in self.cxt.ho:
                     try:
+                        progress.set(f"Exporting images for {po.basename}")
                         po.save_all()
                         po.export_images()
                         po.reload_all()
