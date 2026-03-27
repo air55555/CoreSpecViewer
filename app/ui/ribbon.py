@@ -18,12 +18,317 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+class FlexibleRibbon(QTabWidget):
+    """
+    Ribbon that can:
+    - Add actual tabs (like Ribbon)
+    - Add labeled groups within tabs (like Groups)
+    
+    API:
+      - add_tab(name) - Create a new tab
+      - add_group(name, entries, tab_name=None) - Add a group to current or specified tab
+      - add_global_actions(perm_act_list, pos='left'|'right')
+    """
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTabPosition(QTabWidget.North)
+        self.setMovable(False)
+        self.setDocumentMode(True)
+        
+        self.bars = {}  # tab_name -> list of QToolBars
+        self._tab_layouts = {}  # tab_name -> QHBoxLayout for that tab
+        self._current_tab_name = None
+        
+        # Create default tab to mimic Groups behavior
+        self._create_tab("CoreSpecViewer Controls")
+    
+    def _create_tab(self, name):
+        """Create a new tab with horizontal layout for groups."""
+        page = QWidget(self)
+        page_layout = QHBoxLayout(page)
+        page_layout.setContentsMargins(8, 8, 8, 8)
+        page_layout.setSpacing(0)
+        page_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        
+        self._tab_layouts[name] = page_layout
+        self.addTab(page, name)
+        self._current_tab_name = name
+        self.bars[name] = []
+        
+        return page_layout
+    
+    def add_tab(self, name):
+        """
+        Add a new actual tab.
+        All subsequent add_group() calls will add to this tab.
+        
+        Args:
+            name: Name of the tab to create
+        """
+        if name not in self._tab_layouts:
+            self._create_tab(name)
+        self._current_tab_name = name
+    
+    def add_group(self, name, entries, tab_name=None):
+        """
+        Add a labeled group of buttons to a tab.
+        
+        Args:
+            name: Label for the group
+            entries: List of button/menu specs
+            tab_name: Which tab to add to (None = current tab)
+        """
+        # Determine target tab
+        target_tab = tab_name or self._current_tab_name
+        
+        if target_tab not in self._tab_layouts:
+            self._create_tab(target_tab)
+        
+        # Create toolbar for this group
+        bar = self._create_bar()
+        self.bars[target_tab].append(bar)
+        
+        # Populate toolbar
+        self._populate(bar, entries)
+        
+        # Wrap in styled group widget with label
+        group_widget = self._create_group_widget(bar, name)
+        
+        # Add to the tab's layout
+        layout = self._tab_layouts[target_tab]
+        # Remove stretch if exists, add group, re-add stretch
+        if layout.count() > 0:
+            last_item = layout.itemAt(layout.count() - 1)
+            if last_item.spacerItem():
+                layout.removeItem(last_item)
+        
+        layout.addWidget(group_widget)
+        layout.addStretch(1)
+    
+    def _create_bar(self):
+        """Create a toolbar for a group."""
+        bar = QToolBar(self)
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        bar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        return bar
+    
+    def _create_group_widget(self, bar: QToolBar, group_name: str):
+        """
+        Wrap a toolbar in a group widget with label and separators.
+        """
+        group_widget = QWidget(self)
+        
+        # Outer layout: [ VLine |  inner VBox  | VLine ]
+        outer = QHBoxLayout(group_widget)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        
+        left_sep = QFrame(self)
+        left_sep.setFrameShape(QFrame.VLine)
+        left_sep.setFrameShadow(QFrame.Sunken)
+        left_sep.setLineWidth(1)
+        left_sep.setMidLineWidth(0)
+        
+        right_sep = QFrame(self)
+        right_sep.setFrameShape(QFrame.VLine)
+        right_sep.setFrameShadow(QFrame.Sunken)
+        right_sep.setLineWidth(1)
+        right_sep.setMidLineWidth(0)
+        
+        inner = QVBoxLayout()
+        inner.setContentsMargins(10, 0, 10, 0)
+        inner.setSpacing(2)
+        
+        # Always add label
+        label = QLabel(group_name)
+        label.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+        label.setStyleSheet("QLabel { font-weight: bold; }")
+        inner.addWidget(label)
+        
+        inner.addWidget(bar)
+        
+        outer.addWidget(left_sep)
+        outer.addLayout(inner)
+        outer.addWidget(right_sep)
+        
+        group_widget.adjustSize()
+        group_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        
+        return group_widget
+    
+    def _populate(self, bar: QToolBar, spec):
+        """
+        Populate toolbar with buttons/menus from spec.
+        
+        Spec format:
+        ("button", label, callback[, tooltip[, shortcut]])
+        ("menu", label, submenu_list[, tooltip])
+        
+        Where submenu_list contains:
+        (label, callback[, tooltip[, shortcut]])
+        ("menu", label, nested_submenu_list[, tooltip])
+        """
+        for entry in spec:
+            if not entry:
+                continue
+            
+            kind = entry[0]
+            
+            if kind == "button":
+                # Support formats:
+                # ("button", label, callback)
+                # ("button", label, callback, tooltip)
+                # ("button", label, callback, tooltip, shortcut)
+                label = entry[1]
+                callback = entry[2]
+                tooltip = entry[3] if len(entry) > 3 else None
+                shortcut = entry[4] if len(entry) > 4 else None
+                
+                # Get the top-level window (MainRibbonController)
+                # Parent actions to it so shortcuts work globally
+                main_window = self.window()
+                parent = main_window if main_window else self
+                
+                act = QAction(label, parent)
+                act.triggered.connect(callback)
+                
+                if shortcut:
+                    act.setShortcut(shortcut)
+                    # Add shortcut to tooltip for discoverability
+                    if tooltip:
+                        act.setToolTip(f"{tooltip} ({shortcut})")
+                        act.setStatusTip(f"{tooltip} ({shortcut})")
+                    else:
+                        act.setToolTip(f"{label} ({shortcut})")
+                        act.setStatusTip(f"{label} ({shortcut})")
+                elif tooltip:
+                    act.setToolTip(tooltip)
+                    act.setStatusTip(tooltip)
+                
+                bar.addAction(act)
+            
+            elif kind == "menu":
+                # ("menu", label, submenu_list[, tooltip])
+                label = entry[1]
+                submenu = entry[2]
+                tooltip = entry[3] if len(entry) > 3 else None
+                
+                main_window = self.window()
+                parent = main_window if main_window else self
+                
+                top = QAction(label, parent)
+                if tooltip:
+                    top.setToolTip(tooltip)
+                    top.setStatusTip(tooltip)
+                
+                menu = QMenu(label, bar)
+                self._populate_menu(menu, submenu, bar)
+                top.setMenu(menu)
+                bar.addAction(top)
 
+    def _populate_menu(self, menu: QMenu, items, bar: QToolBar):
+        """
+        Recursively populate a QMenu with items.
+        
+        Items can be:
+        (label, callback[, tooltip[, shortcut]])
+        ("menu", label, submenu_list[, tooltip])
+        """
+        for item in items:
+            if not item:
+                continue
+            
+            # Check if this is a nested menu
+            if item[0] == "menu":
+                # ("menu", label, submenu_list[, tooltip])
+                label = item[1]
+                submenu_items = item[2]
+                tooltip = item[3] if len(item) > 3 else None
+                
+                submenu = QMenu(label, menu)
+                if tooltip:
+                    submenu.setToolTip(tooltip)
+                    submenu.setStatusTip(tooltip)
+                
+                # Recursively populate the submenu
+                self._populate_menu(submenu, submenu_items, bar)
+                menu.addMenu(submenu)
+            
+            else:
+                # Regular menu item (action)
+                # Support: (label, callback), (label, callback, tooltip), 
+                #          (label, callback, tooltip, shortcut)
+                label = item[0]
+                callback = item[1]
+                tooltip = item[2] if len(item) > 2 else None
+                shortcut = item[3] if len(item) > 3 else None
+
+                # Get the top-level window for global shortcuts
+                main_window = self.window()
+                parent = main_window if main_window else self
+                
+                action = QAction(label, parent)
+                action.triggered.connect(callback)
+                
+                if shortcut:
+                    action.setShortcut(shortcut)
+                    # Add shortcut to tooltip for discoverability
+                    if tooltip:
+                        action.setToolTip(f"{tooltip} ({shortcut})")
+                        action.setStatusTip(f"{tooltip} ({shortcut})")
+                    else:
+                        action.setToolTip(f"{label} ({shortcut})")
+                        action.setStatusTip(f"{label} ({shortcut})")
+                elif tooltip:
+                    action.setToolTip(tooltip)
+                    action.setStatusTip(tooltip)
+                
+                menu.addAction(action)
+    
+    def add_global_actions(self, perm_act_list, pos='left'):
+        """Add permanent buttons to the ribbon corner."""
+        tb = QToolBar(self)
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        tb.setStyleSheet("""
+QToolBar {
+    background: #d8d8d8;
+    border: none;
+}
+QToolButton {
+    padding: 2px;
+    margin: 0;
+}
+""")
+        for a in perm_act_list:
+            tb.addAction(a)
+        
+        if pos == 'left':
+            self.setCornerWidget(tb, Qt.TopLeftCorner)
+        else:
+            self.setCornerWidget(tb, Qt.TopRightCorner)
+            
+            
+            
+# ===================== old button layout APIs, not used ======================
 class Ribbon(QTabWidget):
-    """Ribbon with three tabs: Raw, Mask, Visualise.
+    """Ribbon with multiple tabs, each containing a toolbar.
+    
     Entry formats:
       ("button", label, callback)
+      ("button", label, callback, tooltip)
       ("menu",   label, [(item_label, item_callback), ...])
+      ("menu",   label, [(item_label, item_callback), ...], tooltip)
+      
+    Submenu items can be:
+      (sublabel, subcb)
+      (sublabel, subcb, subtooltip)
+      ("menu", sublabel, nested_submenu_list)
+      ("menu", sublabel, nested_submenu_list, tooltip)
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -32,33 +337,130 @@ class Ribbon(QTabWidget):
         self.setDocumentMode(True)
         self.bars = {}
 
-
     def _create_bar(self):
         bar = QToolBar()
         bar.setMovable(False)
         bar.setFloatable(False)
         bar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-
         return bar
 
     def wrap(self, bar):
-        page = QWidget(); lay = QHBoxLayout(page); lay.setContentsMargins(8,8,8,8)
-        lay.addWidget(bar); lay.addStretch(1); return page
+        page = QWidget()
+        lay = QHBoxLayout(page)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.addWidget(bar, 0, Qt.AlignCenter)  # Center align the toolbar
+        return page
 
     def _populate(self, bar: QToolBar, spec):
-        for kind, label, payload in spec:
+        """
+        Populate the given toolbar with actions from the spec.
+    
+        Each entry in spec can be:
+    
+          ("button", label, callback)
+          ("button", label, callback, tooltip)
+    
+          ("menu", label, submenu_list)
+          ("menu", label, submenu_list, tooltip)
+    
+        where submenu_list is:
+          [
+            (sublabel, subcb),
+            (sublabel, subcb, subtooltip),
+            ("menu", sublabel, nested_submenu_list),
+            ("menu", sublabel, nested_submenu_list, tooltip),
+            ...
+          ]
+        """
+        for entry in spec:
+            if not entry:
+                continue
+    
+            kind = entry[0]
+    
             if kind == "button":
+                # ("button", label, callback[, tooltip])
+                if len(entry) == 4:
+                    _kind, label, callback, tooltip = entry
+                else:
+                    _kind, label, callback = entry
+                    tooltip = None
+    
                 act = QAction(label, bar)
-                act.triggered.connect(payload)
+                act.triggered.connect(callback)
+                if tooltip:
+                    act.setToolTip(tooltip)
+                    act.setStatusTip(tooltip)
                 bar.addAction(act)
+    
             elif kind == "menu":
+                # ("menu", label, submenu_list[, tooltip])
+                if len(entry) == 4:
+                    _kind, label, submenu, tooltip = entry
+                else:
+                    _kind, label, submenu = entry
+                    tooltip = None
+    
                 top = QAction(label, bar)
+                if tooltip:
+                    top.setToolTip(tooltip)
+                    top.setStatusTip(tooltip)
+    
                 menu = QMenu(label, bar)
-                for sublabel, subcb in payload:
-                    sub = QAction(sublabel, bar); sub.triggered.connect(subcb)
-                    menu.addAction(sub)
+    
+                # Process submenu items (may include nested menus)
+                self._populate_menu(menu, submenu, bar)
+    
                 top.setMenu(menu)
                 bar.addAction(top)
+
+    def _populate_menu(self, menu: QMenu, items, bar: QToolBar):
+        """
+        Recursively populate a QMenu with items.
+        
+        Items can be:
+          (label, callback)
+          (label, callback, tooltip)
+          ("menu", label, submenu_list)
+          ("menu", label, submenu_list, tooltip)
+        """
+        for item in items:
+            if not item:
+                continue
+            
+            # Check if this is a nested menu
+            if item[0] == "menu":
+                # ("menu", label, submenu_list[, tooltip])
+                if len(item) == 4:
+                    _kind, label, submenu_items, tooltip = item
+                else:
+                    _kind, label, submenu_items = item
+                    tooltip = None
+                
+                submenu = QMenu(label, menu)
+                if tooltip:
+                    submenu.setToolTip(tooltip)
+                    submenu.setStatusTip(tooltip)
+                
+                # Recursively populate the submenu
+                self._populate_menu(submenu, submenu_items, bar)
+                menu.addMenu(submenu)
+            
+            else:
+                # Regular menu item (action)
+                if len(item) == 3:
+                    label, callback, tooltip = item
+                else:
+                    label, callback = item
+                    tooltip = None
+
+                action = QAction(label, bar)
+                action.triggered.connect(callback)
+                if tooltip:
+                    action.setToolTip(tooltip)
+                    action.setStatusTip(tooltip)
+                menu.addAction(action)
+
     def add_tab(self, name, entries):
         new_tab = self._create_bar()
         self.bars[name] = new_tab
@@ -70,10 +472,7 @@ class Ribbon(QTabWidget):
         tb = QToolBar(self)
         tb.setMovable(False)
         tb.setFloatable(False)
-        #tb.setIconSize(QSize(18, 18))
         tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        #tb.setStyleSheet("QToolBar { background: transparent; border: 0; }"
-         #                "QToolButton { padding: 2px; margin: 0; }")
         tb.setStyleSheet("""
 QToolBar {
     background: #d8d8d8;   /* slightly lighter grey than Qt default (~#d4d4d4) */
@@ -85,7 +484,7 @@ QToolButton {
     margin: 0;
 }
 """)
-        if pos=='left':
+        if pos == 'left':
             for a in perm_act_list:
                 tb.addAction(a)
             self.setCornerWidget(tb, Qt.TopLeftCorner)
@@ -148,28 +547,30 @@ class Groups(QTabWidget):
     def _populate(self, bar: QToolBar, spec):
         """
         Populate the given toolbar with actions from the spec.
-    
+
         Each entry in spec can be:
-    
+
           ("button", label, callback)
           ("button", label, callback, tooltip)
-    
+
           ("menu", label, submenu_list)
           ("menu", label, submenu_list, tooltip)
-    
+
         where submenu_list is:
           [
             (sublabel, subcb),
             (sublabel, subcb, subtooltip),
+            ("menu", submenu_label, nested_submenu_list),  # <-- NEW: nested menu
+            ("menu", submenu_label, nested_submenu_list, tooltip),
             ...
           ]
         """
         for entry in spec:
             if not entry:
                 continue
-    
+
             kind = entry[0]
-    
+
             if kind == "button":
                 # ("button", label, callback[, tooltip])
                 if len(entry) == 4:
@@ -177,14 +578,14 @@ class Groups(QTabWidget):
                 else:
                     _kind, label, callback = entry
                     tooltip = None
-    
+
                 act = QAction(label, bar)
                 act.triggered.connect(callback)
                 if tooltip:
                     act.setToolTip(tooltip)
                     act.setStatusTip(tooltip)
                 bar.addAction(act)
-    
+
             elif kind == "menu":
                 # ("menu", label, submenu_list[, tooltip])
                 if len(entry) == 4:
@@ -192,30 +593,66 @@ class Groups(QTabWidget):
                 else:
                     _kind, label, submenu = entry
                     tooltip = None
-    
+
                 top = QAction(label, bar)
                 if tooltip:
                     top.setToolTip(tooltip)
                     top.setStatusTip(tooltip)
-    
+
                 menu = QMenu(label, bar)
-    
-                for sub in submenu:
-                    if len(sub) == 3:
-                        sublabel, subcb, subtip = sub
-                    else:
-                        sublabel, subcb = sub
-                        subtip = None
-    
-                    sub_act = QAction(sublabel, bar)
-                    sub_act.triggered.connect(subcb)
-                    if subtip:
-                        sub_act.setToolTip(subtip)
-                        sub_act.setStatusTip(subtip)
-                    menu.addAction(sub_act)
-    
+
+                # Process submenu items (may include nested menus)
+                self._populate_menu(menu, submenu, bar)
+
                 top.setMenu(menu)
                 bar.addAction(top)
+
+    def _populate_menu(self, menu: QMenu, items, bar: QToolBar):
+        """
+        Recursively populate a QMenu with items.
+        
+        Items can be:
+          (label, callback)
+          (label, callback, tooltip)
+          ("menu", label, submenu_list)
+          ("menu", label, submenu_list, tooltip)
+        """
+        for item in items:
+            if not item:
+                continue
+            
+            # Check if this is a nested menu
+            if item[0] == "menu":
+                # ("menu", label, submenu_list[, tooltip])
+                if len(item) == 4:
+                    _kind, label, submenu_items, tooltip = item
+                else:
+                    _kind, label, submenu_items = item
+                    tooltip = None
+                
+                submenu = QMenu(label, menu)
+                if tooltip:
+                    submenu.setToolTip(tooltip)
+                    submenu.setStatusTip(tooltip)
+                
+                # Recursively populate the submenu
+                self._populate_menu(submenu, submenu_items, bar)
+                menu.addMenu(submenu)
+            
+            else:
+                # Regular menu item (action)
+                if len(item) == 3:
+                    label, callback, tooltip = item
+                else:
+                    label, callback = item
+                    tooltip = None
+
+                action = QAction(label, bar)
+                action.triggered.connect(callback)
+                if tooltip:
+                    action.setToolTip(tooltip)
+                    action.setStatusTip(tooltip)
+                menu.addAction(action)
 
     # ---------- Public API (same signatures as Ribbon) ----------
 
@@ -302,3 +739,293 @@ QToolButton {
             self.setCornerWidget(tb, Qt.TopLeftCorner)
         else:
             self.setCornerWidget(tb, Qt.TopRightCorner)
+            
+class GroupedRibbon(QTabWidget):
+    """
+    Hybrid ribbon that uses tabbed navigation with grouped layouts.
+    
+    Compatible API with Ribbon and Groups:
+      - add_tab(name, entries)
+      - add_global_actions(perm_act_list, pos='left'|'right')
+      
+    Special feature: Use None as an entry to create a visual group separator
+    
+    Example:
+        ribbon.add_tab('Processing', [
+            ("button", "Crop", self.crop),
+            ("button", "Process", self.process),
+            None,  # <- Group separator
+            ("button", "New mask", self.mask),
+            ("button", "Enhance", self.enhance),
+        ])
+    """
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTabPosition(QTabWidget.North)
+        self.setMovable(False)
+        self.setDocumentMode(True)
+        self.bars = {}  # tab_name -> list of QToolBars
+
+    def _create_bar(self):
+        """Create a toolbar for a group."""
+        bar = QToolBar(self)
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        bar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        return bar
+
+    def _populate(self, bar: QToolBar, spec):
+        """
+        Populate the given toolbar with actions from the spec.
+    
+        Each entry in spec can be:
+    
+          ("button", label, callback)
+          ("button", label, callback, tooltip)
+    
+          ("menu", label, submenu_list)
+          ("menu", label, submenu_list, tooltip)
+    
+        where submenu_list is:
+          [
+            (sublabel, subcb),
+            (sublabel, subcb, subtooltip),
+            ("menu", sublabel, nested_submenu_list),
+            ("menu", sublabel, nested_submenu_list, tooltip),
+            ...
+          ]
+        """
+        for entry in spec:
+            if not entry:
+                continue
+    
+            kind = entry[0]
+    
+            if kind == "button":
+                # ("button", label, callback[, tooltip])
+                if len(entry) == 4:
+                    _kind, label, callback, tooltip = entry
+                else:
+                    _kind, label, callback = entry
+                    tooltip = None
+    
+                act = QAction(label, bar)
+                act.triggered.connect(callback)
+                if tooltip:
+                    act.setToolTip(tooltip)
+                    act.setStatusTip(tooltip)
+                bar.addAction(act)
+    
+            elif kind == "menu":
+                # ("menu", label, submenu_list[, tooltip])
+                if len(entry) == 4:
+                    _kind, label, submenu, tooltip = entry
+                else:
+                    _kind, label, submenu = entry
+                    tooltip = None
+    
+                top = QAction(label, bar)
+                if tooltip:
+                    top.setToolTip(tooltip)
+                    top.setStatusTip(tooltip)
+    
+                menu = QMenu(label, bar)
+    
+                # Process submenu items (may include nested menus)
+                self._populate_menu(menu, submenu, bar)
+    
+                top.setMenu(menu)
+                bar.addAction(top)
+
+    def _populate_menu(self, menu: QMenu, items, bar: QToolBar):
+        """
+        Recursively populate a QMenu with items.
+        
+        Items can be:
+          (label, callback)
+          (label, callback, tooltip)
+          ("menu", label, submenu_list)
+          ("menu", label, submenu_list, tooltip)
+        """
+        for item in items:
+            if not item:
+                continue
+            
+            # Check if this is a nested menu
+            if item[0] == "menu":
+                # ("menu", label, submenu_list[, tooltip])
+                if len(item) == 4:
+                    _kind, label, submenu_items, tooltip = item
+                else:
+                    _kind, label, submenu_items = item
+                    tooltip = None
+                
+                submenu = QMenu(label, menu)
+                if tooltip:
+                    submenu.setToolTip(tooltip)
+                    submenu.setStatusTip(tooltip)
+                
+                # Recursively populate the submenu
+                self._populate_menu(submenu, submenu_items, bar)
+                menu.addMenu(submenu)
+            
+            else:
+                # Regular menu item (action)
+                if len(item) == 3:
+                    label, callback, tooltip = item
+                else:
+                    label, callback = item
+                    tooltip = None
+
+                action = QAction(label, bar)
+                action.triggered.connect(callback)
+                if tooltip:
+                    action.setToolTip(tooltip)
+                    action.setStatusTip(tooltip)
+                menu.addAction(action)
+
+    def _create_group_widget(self, bar: QToolBar, group_name: str = None):
+        """
+        Wrap a toolbar in a group widget with optional label and separators.
+        
+        Args:
+            bar: The toolbar to wrap
+            group_name: Optional name to display above the toolbar
+        
+        Returns:
+            QWidget containing the styled group
+        """
+        group_widget = QWidget(self)
+        
+        # Outer layout: [ VLine |  inner VBox  | VLine ]
+        outer = QHBoxLayout(group_widget)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        
+        left_sep = QFrame(self)
+        left_sep.setFrameShape(QFrame.VLine)
+        left_sep.setFrameShadow(QFrame.Sunken)
+        left_sep.setLineWidth(1)
+        left_sep.setMidLineWidth(0)
+        
+        right_sep = QFrame(self)
+        right_sep.setFrameShape(QFrame.VLine)
+        right_sep.setFrameShadow(QFrame.Sunken)
+        right_sep.setLineWidth(1)
+        right_sep.setMidLineWidth(0)
+        
+        inner = QVBoxLayout()
+        inner.setContentsMargins(10, 0, 10, 0)
+        inner.setSpacing(2)
+        
+        if group_name:
+            label = QLabel(group_name)
+            label.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+            label.setStyleSheet("QLabel { font-weight: bold; }")
+            inner.addWidget(label)
+        
+        inner.addWidget(bar)
+        
+        outer.addWidget(left_sep)
+        outer.addLayout(inner)
+        outer.addWidget(right_sep)
+        
+        group_widget.adjustSize()
+        group_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        
+        return group_widget
+
+    def add_tab(self, name, entries):
+        """
+        Create a new tab with grouped toolbars.
+        
+        Use None in the entries list to create group separators.
+        
+        Args:
+            name: Name of the tab
+            entries: List of button/menu specs, with None for group breaks
+        
+        Example:
+            ribbon.add_tab('Processing', [
+                ("button", "Crop", self.crop),
+                None,  # Group break
+                ("button", "Mask", self.mask),
+            ])
+        """
+        # Split entries into groups based on None separators
+        groups = []
+        current_group = []
+        
+        for entry in entries:
+            if entry is None:
+                if current_group:
+                    groups.append(current_group)
+                    current_group = []
+            else:
+                current_group.append(entry)
+        
+        # Don't forget the last group
+        if current_group:
+            groups.append(current_group)
+        
+        # If no separators were used, treat as single group
+        if not groups:
+            groups = [entries]
+        
+        # Create the tab page
+        page = QWidget(self)
+        page_layout = QHBoxLayout(page)
+        page_layout.setContentsMargins(8, 8, 8, 8)
+        page_layout.setSpacing(0)
+        page_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        
+        # Store all bars for this tab
+        self.bars[name] = []
+        
+        # Create a toolbar for each group
+        for i, group_entries in enumerate(groups):
+            bar = self._create_bar()
+            self.bars[name].append(bar)
+            
+            # Populate the toolbar
+            self._populate(bar, group_entries)
+            
+            # Wrap in styled group widget (no label for cleaner look)
+            group_widget = self._create_group_widget(bar)
+            
+            # Add to page layout
+            page_layout.addWidget(group_widget)
+        
+        # Add stretch at the end
+        page_layout.addStretch(1)
+        
+        # Add the tab
+        self.addTab(page, name)
+
+    def add_global_actions(self, perm_act_list, pos='left'):
+        """Add permanent buttons (e.g., Open/Save) to the ribbon corner."""
+        tb = QToolBar(self)
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        tb.setStyleSheet("""
+QToolBar {
+    background: #d8d8d8;
+    border: none;
+}
+QToolButton {
+    padding: 2px;
+    margin: 0;
+}
+""")
+        for a in perm_act_list:
+            tb.addAction(a)
+
+        if pos == 'left':
+            self.setCornerWidget(tb, Qt.TopLeftCorner)
+        else:
+            self.setCornerWidget(tb, Qt.TopRightCorner)
+            
+

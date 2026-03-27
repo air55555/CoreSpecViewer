@@ -32,6 +32,10 @@ or call the top-level `main()` function to launch the full CoreSpecViewer GUI.
 """
 import sys
 
+import logging
+import logging.handlers
+from pathlib import Path
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QAction,
@@ -49,10 +53,14 @@ from PyQt5.QtWidgets import (
 from .interface import tools as t
 from .models import CurrentContext, HoleObject, RawObject
 from .ui.cluster_window import ClusterWindow
+from .ui.band_math_dialogue import BandMathsDialog
+from .ui.load_dialogue import LoadDialogue
 from .ui import (
     AutoSettingsDialog,
     CatalogueWindow,
     Groups,
+    GroupedRibbon,
+    FlexibleRibbon,
     HolePage,
     InfoTable,
     LibraryPage,
@@ -66,15 +74,50 @@ from .ui import (
     two_choice_box,
     WavelengthRangeDialog
 )
+from .ui.raw_actions import RawActions
+from .ui.mask_actions import MaskActions
+from .ui.vis_actions import VisActions
+from .ui.hole_actions import HoleActions
 
-feature_keys = [
-    '1400W', '1480W', '1550W', '1760W', '1850W',
-    '1900W', '2080W', '2160W', '2200W', '2250W',
-    '2290W', '2320W', '2350W', '2390W', '2950W',
-    '2950AW', '2830W', '3000W', '3500W', '4000W',
-    '4000WIDEW', '4470TRUEW', '4500SW', '4500CW',
-    '4670W', '4920W', '4000V_NARROWW', '4000shortW', '2950BW'
-]
+from .ui.box_ops import BoxOperations
+from .ui.display_text import gen_display_text
+
+def setup_logging(log_dir='logs', log_level=logging.INFO):
+    """Configure application-wide logging"""
+    log_path = Path(log_dir)
+    log_path.mkdir(exist_ok=True)
+    
+    logger = logging.getLogger("app")
+    logger.setLevel(log_level)
+    
+    # File handler
+    try:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path / 'corespec.log',
+            maxBytes=10*1024*1024,
+            backupCount=5
+        )
+        file_handler.setFormatter(
+            logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        )
+    except PermissionError:
+        # Log file is locked, continue without file logging
+        file_handler = None
+        print("Warning: Could not open log file (may be open in another program)")
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    )
+    if file_handler is not None:
+        logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger 
+
+setup_logging()
+logger = logging.getLogger(__name__)
 
 
 class MainRibbonController(QMainWindow):
@@ -89,21 +132,20 @@ class MainRibbonController(QMainWindow):
         super().__init__(parent)
 
         self.setWindowTitle("CoreSpecViewer")
-        self.resize(1400, 900)
+        
         
         # --- Data shared across modes (filled as user works) ---
         self.cxt = CurrentContext()
         self._catalogue_window = None
         self.cluster_windows: list[ClusterWindow] = []
-        self.legend_mapping_path = None
-
+        
         # --- UI shell: ribbon + stacked pages ---
         central = QWidget(self)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         self.setCentralWidget(central)
         # ===== Ribbon operations
-        self.ribbon = Groups(self)
+        self.ribbon = FlexibleRibbon(self)
 
 
         outer.addWidget(self.ribbon, 0)
@@ -132,7 +174,11 @@ class MainRibbonController(QMainWindow):
         self.multibox_act.triggered.connect(self.process_multi_raw)
         self.multibox_act.setToolTip("Select a directory to process All raw data inside")
         
-        everpresents = [self.open_act, self.multibox_act, self.save_act, self.save_as_act, self.undo_act]
+        self.archive_box_act = QAction("Archive Box", self)
+        self.archive_box_act.triggered.connect(self.archive_box)
+        self.archive_box_act.setToolTip("Send this box to an archive file")
+        
+        everpresents = [self.open_act, self.multibox_act, self.save_act, self.save_as_act, self.undo_act,self.archive_box_act]
 
         self.ribbon.add_global_actions(everpresents)
         #====== non-tab buttons=================
@@ -149,111 +195,86 @@ class MainRibbonController(QMainWindow):
         # ===== Create all pages==============================================
         self.tabs = QTabWidget(self)
         self.tabs.setTabPosition(QTabWidget.North)   # or South if you prefer
-
-
-        self.raw_page = RawPage(self)
-        self.vis_page = VisualisePage(self)
-        self.lib_page = LibraryPage(self)
-        self.hol_page = HolePage(self)
-
-        self.hol_page.changeView.connect(lambda key: self.choose_view(key, force=True))
-        self.vis_page.clusterRequested.connect(self.open_cluster_window)
-
-        self.page_list = [self.raw_page, self.vis_page, self.lib_page, self.hol_page]
+        self.page_list = []
+        self.pg_idx_map = {}
+        self.raw_page = self.add_page(
+            RawPage(self),
+            tab_label="Raw",
+            key='raw'
+        )
+        self.vis_page = self.add_page(
+            VisualisePage(self),
+            tab_label="Visualise",
+            key='vis',
+            connect_signals={'clusterRequested': self.open_cluster_window}
+        )
+        self.lib_page = self.add_page(
+            LibraryPage(self),
+            tab_label="Libraries",
+            key='lib'
+        )
+        self.hol_page = self.add_page(
+            HolePage(self),
+            tab_label="Hole",
+            key='hol',
+            connect_signals={'changeView': lambda key: self.choose_view(key, force=True)}
+        )
+        #============== Action groups==========================================
+        self.box_ops = BoxOperations(self.cxt, self)
+        self.action_groups = []
+        self.raw_actions = self.add_action(RawActions)
+        self.mask_actions = self.add_action(MaskActions)
+        self.vis_actions = self.add_action(VisActions, box_ops = self.box_ops)
+        self.hole_actions = self.add_action(HoleActions, box_ops = self.box_ops)
+           
+        
+        
         #ensure pgs have correct context at start
-        self._distribute_context()
         self.lib_page._find_default_database()
-
-        self.tabs.addTab(self.raw_page, "Raw")
-        self.tabs.addTab(self.vis_page, "Visualise")
-        self.tabs.addTab(self.lib_page, "Libraries")
-        self.tabs.addTab(self.hol_page, "Hole")
-        self.pg_idx_map = {'raw': 0, 'vis': 1, 'lib': 2, 'hol': 3}
-
+        self._distribute_context()
+                
         self._last_tab_idx = self.tabs.currentIndex()
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self.tabs, 1)
 
         # Initial mode
-
         self.raw_page.activate()
 
         # Populate ribbon & connect mode switching
-        self._init_ribbon()
+        #self._init_ribbon()
 
         self.statusBar().showMessage("Ready.")
-
-    # =============== Ribbon population ====================
-    def _init_ribbon(self):
-        """Create actions for each tab; all callbacks route to controller methods."""
-        # --- RAW TAB ---
-        self.ribbon.add_tab('Raw',[
-            ("button", "Auto Crop", self.automatic_crop, "Faster on Raw than Processed data.\nUses image analysis to automatically detect core box - NB. is very flaky"),
-            ("button", "Crop",        self.crop_current_image, "Faster on Raw than Processed data.\nManually crop the image"),
-            ("button", "Process",     self.process_raw, "Produce a processed dataset from this raw dataset"),
-        ])
-
-        # --- MASK TAB ---
-        self.ribbon.add_tab('Masking', [
-            ("button", "New mask", lambda: self.act_mask_point('new'), "Creates a blank mask,\n then masks by correlation with selected pixel."),
-            ("button", "Enhance mask", lambda: self.act_mask_point('enhance'), "Adds to existing mask by correlation with selected pixel"),
-            ("button", "Mask line", lambda: self.act_mask_point('line'), "Adds a masked vertical line to existing mask"),
-            ("button", "Mask region", self.act_mask_rect, "Adds a masked rectangle to existing mask"),
-            ("menu",   "Freehand mask region", [
-                ("Mask outside selected", lambda: self.act_mask_polygon(mode = "mask outside"), "With exising mask, masks all pixels outside of selected region"),
-                ("Mask inside selected", lambda: self.act_mask_polygon(mode = "mask inside"), "With exising mask, masks all pixels outside of selected region")
-            ]),
-            ("button", "Despeckle", self.despeck_mask, "Remove speckles from mask"),
-            ("button", "Improve", self.act_mask_improve, "Heuristically improves the mask"),
-            ("button", "Calc stats", self.act_mask_calc_stats, "Calculates connected components used for downhole unwrapping"),
-            ("button", "unwrap preview", self.unwrap, 'Produces "unwrapped" coreboxes by vertical concatenation: Right→Left, Top→Bottom')
-        ])
-
-        # --- VISUALISE TAB ---
-        self.extract_feature_list = []
-        for key in feature_keys:
-            self.extract_feature_list.append((key, lambda _, k=key: self.run_feature_extraction(k)))
-        self.ribbon.add_tab('Visualise', [
-            ("button", "Quick Cluster", self.act_kmeans, "Performs unsupervised k-means clustering"),
-            ("menu",   "Correlation", [
-                ("MineralMap Pearson (Winner-takes-all)", self.act_vis_correlation, "Performs Pearson correlation against selected collection from the library"),
-                ("MineralMap SAM (Winner-takes-all)", self.act_vis_sam, "Performs Spectral Angle Mapping against selected collection from the library"),
-                ("MineralMap MSAM (Winner-takes-all)", self.act_vis_msam, "Performs Modified Spectral Angle Mapping against selected collection from the library"),
-                ("Multi-range check (Winner-takes-all)", self.act_vis_multirange, "Performs custom multi-window matching"),
-                ("select range", self.act_subrange_corr, "Performs correlation on a chosed wavelength range"),
-                ("Re-map legends", self._remap_legends)
-                
-                
-               ]),
-            ("menu",   "Features", self.extract_feature_list, "Performs Minimum Wavelength Mapping"),
-            ("button", "Generate Images", self.gen_images, "Generates full size images of all products and base datasets in an outputs folder"),
-            ("menu", "Library building", [
-                ("Add spectra", self.act_lib_pix, "Add a single pixel spectra to the current library\n WARNING: This will modify the library on disk, use a back up"),
-                ("Add region average", self.act_lib_region, "Add the average spectra of a region to the current library\n WARNING: This will modify the library on disk, use a back u"),
-                ])
-            ])
+    # =============== Add page convenience ====================================
+    
+    def add_page(self, page_instance, tab_label, key, connect_signals=None):
+        """
+        Registers a specific page instance to self.tabs, self.page_list and self.pg_idx_map.
+        Also registers any signals and slots specific to the page instance
         
-        # --- HOLE TAB ---
-        self.extract_feature_list_multi = []
-        for key in feature_keys:
-            self.extract_feature_list_multi.append((key, lambda _, k=key: self.run_feature_extraction(k, multi=True)))
-        self.ribbon.add_tab('Hole operations',[
-                            ("button", "Previous", self.hole_prev_box, "View previous box in hole"),
-                            ("button", "Next", self.hole_next_box, "View next box in hole"),
-                            ("button", "Return to Raw", self.hole_return_to_raw, "Open the raw dataset to replace this box"),
-                            ("button", "Quick Cluster", lambda: self.act_kmeans(multi = True)),
-                            ("menu",   "Fullhole Correlations", [
-                                ("MineralMap Pearson (Winner-takes-all)", lambda: self.act_vis_correlation(multi=True)),
-                                ("MineralMap SAM (Winner-takes-all)", lambda: self.act_vis_sam( multi=True)),
-                                ("MineralMap MSAM (Winner-takes-all)", lambda: self.act_vis_msam(multi=True)),
-                                ("Multi-range check (Winner-takes-all)", lambda: self.act_vis_multirange(multi = True), "Performs custom multi-window matching"),
-                                ("select range", lambda: self.act_subrange_corr(multi = True), "Performs correlation on a chosed wavelength range"),
-                               ]),
-                            ("menu",   "Fullhole Features", self.extract_feature_list_multi),
-                            ("button", "Save All", self.save_all_changes),
-                            ("button", "Generate Images", lambda: self.gen_images(multi = True))
-                            ])
+        """
+        # Add to page_list for context distribution
+        self.page_list.append(page_instance)
+        tab_index = self.tabs.addTab(page_instance, tab_label)
+        self.pg_idx_map[key] = tab_index
+        page_instance.cxt = self.cxt # -> might be redundant as there is a distribute context call
+        # Connect any signals if specified
+        if connect_signals:
+            for signal_name, callback in connect_signals.items():
+                signal = getattr(page_instance, signal_name, None)
+                if signal:
+                    signal.connect(callback)    
+        return page_instance
+
+
+    def add_action(self, Act, box_ops = None):
+        if box_ops is None:
+            act_instance = Act(self.cxt, self.ribbon, parent = self)
+        else:
+            act_instance = Act(self.cxt, self.ribbon, parent = self, box_ops = box_ops)
+        self.action_groups.append(act_instance)
+        return act_instance
+
 
     #======== UI methods ===============================================
     def _clear_all_canvas_refs(self):
@@ -269,7 +290,7 @@ class MainRibbonController(QMainWindow):
     
     
     def update_display(self, key = 'mask'):
-        p = self._active_page()
+        p = self.active_page()
         p.update_display(key = key)
 
 
@@ -293,8 +314,11 @@ class MainRibbonController(QMainWindow):
     def _distribute_context(self):
         for pg in self.page_list:
             pg.cxt = self.cxt
+        for act in self.action_groups:
+            act.cxt = self.cxt
+        self.box_ops.cxt = self.cxt
 
-    def _active_page(self):
+    def active_page(self):
         return self.tabs.currentWidget()
 
     def choose_view(self, key= 'raw', force = False):
@@ -311,9 +335,35 @@ class MainRibbonController(QMainWindow):
         self.tabs.setCurrentIndex(self.pg_idx_map[key])
 
 
+# convenience method exposed to Action classes
+
+    def refresh(self, view_key: str = None, dataset_key: str = 'mask'):
+        """
+        Refresh context and UI after data operations.
+        
+        Args:
+            view_key: Optional view to switch to ('raw', 'vis', 'lib', 'hol')
+            dataset_key: Dataset key to display (default: 'mask')
+        """
+        import time
+        start = time.perf_counter()
+        logger.debug(f"PROFILE CONTROLLER REFRESH: Start controller refesh: {start:.4f}s")
+        self._distribute_context()
+        checkpoint_1 = time.perf_counter()
+        logger.debug(f"PROFILE CONTROLLER REFRESH: context distributed: {checkpoint_1 - start:.4f}s")
+        if view_key:
+            self.choose_view(view_key)
+            checkpoint_2 = time.perf_counter()
+            logger.debug(f"PROFILE CONTROLLER REFRESH: Choose view path: {checkpoint_2 - checkpoint_1:.4f}s")
+        self.update_display(key=dataset_key)
+        checkpoint_3 = time.perf_counter()
+        logger.debug(f"PROFILE CONTROLLER REFRESH: after update display (time calculated independent of choose view path): {checkpoint_3 - checkpoint_1:.4f}s")
+        logger.debug(f"PROFILE CONTROLLER REFRESH: Total : {checkpoint_3 - start:.4f}s")
+
 #================= Global actions========================================
 
     def show_cat(self):
+        logger.info('Button clicked: Catalogue pane viewed')
         if self._catalogue_window is None:
             self._catalogue_window = CatalogueWindow(
                 parent=self,
@@ -332,7 +382,7 @@ class MainRibbonController(QMainWindow):
         self._catalogue_window.activateWindow()
 
     def display_info(self):
-        print('info button clicked')
+        logger.info('Button clicked: Metadata viewed')
         self.table_window = InfoTable()
         if self.cxt is not None and self.cxt.current is not None:
             self.table_window.set_from_dict(self.cxt.current.metadata)
@@ -342,6 +392,7 @@ class MainRibbonController(QMainWindow):
 
 
     def on_settings(self):
+        logger.info('Button clicked: Config settings viewed')
         dlg = AutoSettingsDialog(self)
         if dlg.exec_():
             # user clicked Save; propagate lightweight refresh
@@ -354,6 +405,7 @@ class MainRibbonController(QMainWindow):
 
 #================= Everpresent actions =====================================
     def on_catalogue_activated(self, path):
+        logger.info('Button clicked: Catalogue window viewed')
         if not path:
             return
         with busy_cursor(self, 'Loading....'):
@@ -363,10 +415,12 @@ class MainRibbonController(QMainWindow):
                     self.cxt.current = loaded_obj
                     self.choose_view('raw')
                     self.update_display()
+                    logger.info(f"loaded raw data {self.cxt.current.basename} from catalogue")
                 else:
                     self.cxt.current = loaded_obj
                     self.choose_view('vis')
                     self.update_display()
+                    logger.info(f"loaded processed data {self.cxt.current.basename} from catalogue")
                 return
             except Exception as e:
                 
@@ -377,141 +431,73 @@ class MainRibbonController(QMainWindow):
                     self._distribute_context()
                     self.choose_view('hol')
                     self.update_display()
+                    logger.info(f"loaded hole {self.cxt.ho.hole_id} from catalogue")
                     return
                 except Exception as e:
                     QMessageBox.warning(self, "Open dataset", f"Failed to open hole dataset: {e}")
+                    logger.warning(f"failed to open datasets from {path} provided", exc_info=True)
                     return
-                    return
+                    
 
 
     def load_from_disk(self):
-        '''loads PO or RO only, HO and db are loaded from control panel on
-        thei respective games'''
-        clicked_button = choice_box( "What would you like to open?", ["Processed dataset", "Raw directory", "Hole directory", "Mangled Dataset"])
-
-        if clicked_button is None:
-            return
-        
-        if clicked_button == 3:
-            data_head_path, _ = QFileDialog.getOpenFileName(
-            self, "Open Data header file", "", "header files (*.hdr)")
-            if not data_head_path:
-                return
-            white_head_path, _ = QFileDialog.getOpenFileName(
-            self, "Open White header file", "", "header files (*.hdr)")
-            if not white_head_path:
-                return
-            dark_head_path, _ = QFileDialog.getOpenFileName(
-            self, "Open Dark header file", "", "header files (*.hdr)")
-            if not dark_head_path:
-                return
-            metadata_path, _ = QFileDialog.getOpenFileName(
-            self, "Optional lumo metadata", "", "header files (*.xml)")
-            try:
-                self.cxt.current = RawObject.manual_create_from_multiple_paths(data_head_path, 
-                                                                               white_head_path, 
-                                                                               dark_head_path, 
-                                                                               metadata_path = metadata_path)
-                self.choose_view('raw')
-                self.update_display()
-                return
-            except ValueError as e:
-                QMessageBox.warning(self, "Open dataset", f"Failed to open dataset: {e}/n manually add raw paths if file names are inconsistent")
-                data_raw_path, _ = QFileDialog.getOpenFileName(
-                self, "Open Data raw", "", "raw files (*)")
-                if not data_raw_path:
-                    return
-                white_raw_path, _ = QFileDialog.getOpenFileName(
-                self, "Open White raw", "", "raw files (*)")
-                if not white_raw_path:
-                    return
-                dark_raw_path, _ = QFileDialog.getOpenFileName(
-                self, "Open Dark raw", "", "raw files (*)")
-                if not dark_raw_path:
-                    return
-                try:
-                    self.cxt.current = RawObject.manual_create_from_critical_paths(data_head_path,
-                                                                                data_raw_path,
-                                                                                white_head_path,
-                                                                                white_raw_path,
-                                                                                dark_head_path,
-                                                                                dark_raw_path,
-                                                                                metadata_path= metadata_path) 
-                    self.choose_view('raw')
-                    self.update_display()
-                    return
-                except ValueError as e:
-                    QMessageBox.warning(self, "Open dataset", f"Failed to open dataset: {e}")
-                    return
-                    
-        
-        
-        
-        if clicked_button == 1 or clicked_button == 2:
-            path = QFileDialog.getExistingDirectory(
-                       self,
-                       "Select directory",
-                       "",
-                       QFileDialog.ShowDirsOnly
-                       )
-            if not path:
-                return
-        elif clicked_button == 0:
-            path, _ = QFileDialog.getOpenFileName(
-            self, "Open JSON Metadata", "", "JSON files (*.json)")
-            if not path:
-                return
-        try:
-            with busy_cursor('loading...', self):
-                if clicked_button == 2:
-                    hole = HoleObject.build_from_parent_dir(path)
-                    
-                    self.cxt.ho = hole
-                    self._distribute_context()
-                    self.choose_view('hol')
-                    self.update_display()
-                    return
-                else:
-                    loaded_obj = t.load(path)
-                if loaded_obj.is_raw:
-                    self.cxt.current = loaded_obj
-                    self.choose_view('raw')
-                    self.update_display()
-                else:
-                    self.cxt.current = loaded_obj
-                    self.choose_view('vis')
-                    self.update_display()
-        except Exception as e:
-            QMessageBox.warning(self, "Open dataset", f"Failed to open dataset: {e}")
-            return
+        logger.info("load dialogue opened")
+        dlg = LoadDialogue(self.cxt, parent=self)
+        if dlg.exec_() == QDialog.Accepted:
+            self.choose_view(dlg.view_flag)
+            self.update_display()
 
 
     def process_multi_raw(self):
+        logger.info("Button clicked: multi-box processing")
         multi_box.run_multibox_dialog(self)
 
-
-    def gen_images(self, multi = False):
-        if self.cxt is None:
+    
+    def archive_box(self):
+        logger.info("Button clicked: Archive Box")
+        valid_state, msg = self.cxt.requires(self.cxt.PROCESSED)
+        if not valid_state:
+            logger.warning(msg)
+            QMessageBox.information(self, "Archive", msg)
             return
-        if multi:
-            if self.cxt.ho is None:
-                return
-            for po in self.cxt.ho:
-                self.cxt.current.save_all()
-                po.export_images()
-                self.cxt.current.reload_all()
-                self.cxt.current.load_thumbs()
-            
-        if self.cxt.po is None or self.cxt.current.is_raw:
-            return
-        self.cxt.current.export_images()
         
+        # Check for unsaved temporary datasets
+        if self.cxt.current.has_temps:
+            choice = two_choice_box(
+                'You have unsaved datasets. Save them first?',
+                'Save & Archive',
+                'Archive without saving'
+            )
+            if choice == 'left':  # Save temps first
+                try:
+                    self.cxt.po.commit_temps()
+                    logger.info(f"Committed temporary datasets before archiving {self.cxt.current.basename}")
+                except Exception as e:
+                    logger.error(f"Failed to save temps before archiving", exc_info=True)
+                    QMessageBox.warning(self, "Commit Error", f"Failed to upgrade datasets: {e}")
+                    return
+        
+        dest = QFileDialog.getExistingDirectory(self, "Choose save folder", str(self.cxt.current.root_dir))
+        if not dest:
+            return
+        
+        test = two_choice_box('Save product datasets?', 'yes', 'no')
+        try:
+            if test != 'left':
+                self.cxt.current.save_archive_file(dest)
+            else:
+                self.cxt.current.save_archive_file(dest, include_products=True)
+        except (KeyError, FileNotFoundError, PermissionError) as e:
+            logger.error(f"Failed to archive dataset {self.cxt.current.basename}", exc_info=True)
+            QMessageBox.warning(self, "Archive dataset", f"Failed to archive dataset: {e}")
 
 
     def save_clicked(self):
-
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "save", "Raw data must be processed prior to saving")
+        logger.info("Button clicked: Save")
+        valid_state, msg = self.cxt.requires(self.cxt.PROCESSED)
+        if not valid_state:
+            logger.warning(msg)
+            QMessageBox.information(self, "Save", msg)
             return
         if self.cxt.current.has_temps:
             test = two_choice_box('Commit changes before saving?', 'yes', 'no')
@@ -519,6 +505,7 @@ class MainRibbonController(QMainWindow):
             if test == 'left':
 
                 self.cxt.po.commit_temps()
+                logger.info(f"Button clicked: Commit temps for {self.cxt.po.basename}")
 
         wants_prompt = True
         if self.cxt.current.datasets:
@@ -529,831 +516,61 @@ class MainRibbonController(QMainWindow):
             if not dest:
                 return
             self.cxt.current.update_root_dir(dest)  # rewires every dataset path to the chosen folder
+            logger.info(f"Save location updated to {self.cxt.current.root_dir}")
         try:
             with busy_cursor('saving...', self):
                 self.cxt.current.save_all()
                 self.cxt.current.reload_all()
                 self.cxt.current.load_thumbs()
                 self.update_display()
+                logger.info(f"Saved {self.cxt.current.basename}")
         except Exception as e:
-           QMessageBox.warning(self, "Save dataset", f"Failed to save dataset: {e}")
-           return
+            logger.error(f"Failed to save dataset {self.cxt.current.basename}", exc_info=True)
+            QMessageBox.warning(self, "Save dataset", f"Failed to save dataset: {e}")
+            return
 
 
     def save_as_clicked(self):
-        if self.cxt.po is None:
-            QMessageBox.information(self, "save", "Raw data must be processed prior to saving")
+        logger.info("Button clicked: Save As")
+        valid_state, msg = self.cxt.requires(self.cxt.PROCESSED)
+        if not valid_state:
+            logger.warning(msg)
+            QMessageBox.information(self, "Save As", msg)
             return
         if self.cxt.current.has_temps:
             test = two_choice_box('Commit changes before saving?', 'yes', 'no')
             if test == 'left':
                 self.cxt.po.commit_temps()
-
+                logger.info(f"Button clicked: Commit temps for {self.cxt.po.basename}")
         dest = QFileDialog.getExistingDirectory(self, "Choose save folder", str(self.cxt.current.root_dir))
         if not dest:
             return
         self.cxt.current.update_root_dir(dest)  # rewires every dataset path to the chosen folder
+        logger.info(f"Save location updated to {self.cxt.current.root_dir}")
         try:
             with busy_cursor('saving...', self):
                 self.cxt.current.build_all_thumbs()
                 self.cxt.current.save_all_thumbs()
                 self.cxt.po.save_all(new=True)
+                logger.info(f"Saved {self.cxt.current.basename}")
         except Exception as e:
+            logger.error(f"Failed to save dataset {self.cxt.current.basename}", exc_info=True)
             QMessageBox.warning(self, "Save dataset", f"Failed to save dataset: {e}")
             return
 
 
     def undo_unsaved(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Undo", "No Current Scan")
+        logger.info(f"Button clicked: Undo")
+        valid_state, msg = self.cxt.requires(self.cxt.SCAN)
+        if not valid_state:
+            logger.warning(msg)
+            QMessageBox.information(self, "Undo", msg)
             return
         self.cxt.current = t.reset(self.cxt.current)
+        logger.info(f"{self.cxt.current.basename} temp datasets cleared")
         self._distribute_context()
         self.update_display()
 
-    # -------- RAW actions --------
-
-    def crop_current_image(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        p = self._active_page()
-        if not p or not p.dispatcher or not p.left_canvas:
-            return
-
-        # Ask the page to collect a rectangle and pass back coords
-        def _on_rect(y0, y1, x0, x1):
-            try:
-                with busy_cursor('cropping...', self):
-                    self.cxt.current = t.crop(self.cxt.current, y0, y1, x0, x1)
-                    self._distribute_context()
-                    self.update_display()
-            finally:
-                p.dispatcher.clear_all_temp()
-        p.dispatcher.set_rect(_on_rect)
-        p.left_canvas.start_rect_select()
-
-    def automatic_crop(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Cropping", "No Current Scan")
-            return
-        with busy_cursor('cropping...', self):
-            self.cxt.current = t.crop_auto(self.cxt.current)
-        self._distribute_context()
-        self.update_display()
-
-
-    def process_raw(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        if not self.cxt.current.is_raw:
-            QMessageBox.information(self, "Process", "Load a raw dataset first.")
-            return
-        if (
-        not self.cxt.current.metadata.get('borehole id')
-        or not self.cxt.current.metadata.get('box number')
-        or not self.cxt.current.metadata.get('core depth start')
-        or not self.cxt.current.metadata.get('core depth stop')
-        ):
-            dlg = MetadataDialog(self.cxt.current.metadata, parent=self)
-            if dlg.exec() == QDialog.Accepted:
-                result = dlg.get_result()
-                self.cxt.current.metadata['borehole id'] = result['hole']
-                self.cxt.current.metadata['box number'] = result['box']
-                self.cxt.current.metadata['core depth start'] = result['depth_from']
-                self.cxt.current.metadata['core depth stop'] = result['depth_to']
-        try:
-            with busy_cursor('processing...', self):
-
-                self.cxt.po = self.cxt.current.process()
-
-
-        except Exception as e:
-            QMessageBox.warning(self, "Process", f"Failed to process/save: {e}")
-            return
-
-        self.choose_view('vis')
-        self.update_display()
-        self.statusBar().showMessage("Processed saved")
-
-
-    # -------- MASK actions --------
-
-    def act_mask_rect(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Masking", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Mask region", "Open a processed dataset first.")
-            return
-        p = self._active_page()
-        if not p or not p.dispatcher or not p.left_canvas:
-            return
-
-        def _on_rect(y0, y1, x0, x1):
-            try:
-                self.cxt.current = t.mask_rect(self.cxt.current, y0, y1, x0, x1 )
-                self._distribute_context()
-                self.update_display()
-            finally:
-                p.dispatcher.clear_all_temp()
-        p.dispatcher.set_rect(_on_rect)
-        p.left_canvas.start_rect_select()
-
-    def act_mask_point(self, mode):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Masking", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Mask region", "Open a processed dataset first.")
-            return
-        p = self._active_page()
-        if not p or not p.dispatcher or not p.left_canvas:
-            return
-
-        def handle_point_click(y, x):
-            try:
-                with busy_cursor('trying mask correlation...', self):
-                    self.cxt.current = t.mask_point(self.cxt.current, mode, y, x)
-                self._distribute_context()
-                self.update_display()
-            finally:
-                p.dispatcher.clear_all_temp()
-        p.dispatcher.set_single_click(handle_point_click)
-
-
-    def act_mask_improve(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Masking", "No Current Scan")
-            return
-        self.cxt.current = t.improve_mask(self.cxt.current)
-        self._distribute_context()
-        self.update_display()
-
-    def despeck_mask(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Masking", "No Current Scan")
-            return
-        self.cxt.current = t.despeckle_mask(self.cxt.current)
-        self._distribute_context()
-        self.update_display()
-
-    def act_mask_polygon(self, mode = "mask outside"):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Masking", "No Current Scan")
-            return
-        p = self._active_page()
-        if not p or not p.dispatcher or self.cxt.current is None:
-            return
-        def _on_finish(vertices_rc):
-            self.cxt.current = t.mask_polygon(self.cxt.current, vertices_rc, mode = mode)
-            self._distribute_context()
-            self.update_display()
-            p.dispatcher.clear_all_temp()
-        p.dispatcher.set_polygon(_on_finish, temporary=True)
-        p.left_canvas.start_polygon_select()
-
-
-    def act_mask_calc_stats(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Stats", "Open a processed dataset first.")
-            return
-        self.cxt.current = t.calc_unwrap_stats(self.cxt.current)
-
-        self._distribute_context()
-        self.update_display(key = 'segments')
-
-
-    def unwrap(self):
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-
-        if not self.cxt.current.has('stats'):
-            QMessageBox.warning(self, "Warning", "No stats calculated yet.")
-            return
-        with busy_cursor('unwrapping...', self):
-            self.cxt.current = t.unwrapped_output(self.cxt.current)
-        self._distribute_context()
-        self.update_display(key='DholeAverage')
-
-    # -------- VISUALISE actions --------
-    
-    def ask_collection_name(self):
-        if not self.cxt.library:
-            return None
-        names = sorted(self.cxt.library.collections.keys())
-        if not names:
-            QMessageBox.information(self, "No collections", "Create a collection first via 'Add Selected → Collection'.")
-            return None
-        if len(names) == 1:
-            return names[0]
-        name, ok = QInputDialog.getItem(self, "Select Collection", "Collections:", names, 0, False)
-        return name if ok else None
-    
-    
-    def run_feature_extraction(self, key, multi = False):
-        if multi:
-            if self.cxt.ho is None: 
-                return
-            with busy_cursor('feature extraction {key}....', self):
-                for po in self.cxt.ho:
-                    t.run_feature_extraction(po, key)
-                    po.commit_temps()
-                    po.save_all()
-                    po.reload_all()
-                    po.load_thumbs()
-                
-                self.choose_view('hol')
-                self.update_display()
-            return
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        
-        with busy_cursor(f'extracting {key}...', self):
-            self.cxt.current = t.run_feature_extraction(self.cxt.current, key)
-        
-        self.choose_view('vis')
-        self.update_display()
-
-
-    def act_vis_correlation(self, multi = False):
-        if multi:
-            if self.cxt.ho is None: 
-                QMessageBox.information(self, "Correlation", "No Hole dataset loaded for multibox operations")
-                return
-            name = self.ask_collection_name()
-            if not name:
-                return
-            exemplars = self.cxt.library.get_collection_exemplars(name)
-            if not exemplars:
-                return
-            with busy_cursor('correlation...', self):
-                for po in self.cxt.ho:
-                    t.wta_min_map(po, exemplars, name)
-                    po.commit_temps()
-                    po.save_all()
-                    po.reload_all()
-                    po.load_thumbs()
-                    
-            self.choose_view('hol')
-            self.update_display()
-            return
-        #======================================================================
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Correlation", "Open a processed dataset first.")
-            return
-        name = self.ask_collection_name()
-        if not name:
-            return
-        exemplars = self.cxt.library.get_collection_exemplars(name)
-        if not exemplars:
-            return
-        with busy_cursor('correlation...', self):
-            self.cxt.current = t.wta_min_map(self.cxt.current, exemplars, name)
-
-        self.choose_view('vis')
-        self.update_display()
-
-
-    def act_vis_sam(self, multi = False):
-        if multi:
-            if self.cxt.ho is None: 
-                QMessageBox.information(self, "Correlation", "No Hole dataset loaded for multibox operations")
-                return
-            name = self.ask_collection_name()
-            if not name:
-                return
-            exemplars = self.cxt.library.get_collection_exemplars(name)
-            if not exemplars:
-                return
-            with busy_cursor('correlation...', self):
-                for po in self.cxt.ho:
-                    t.wta_min_map_SAM(po, exemplars, name)
-                    po.commit_temps()
-                    po.save_all()
-                    po.reload_all()
-                    po.load_thumbs()
-                    
-            self.choose_view('hol')
-            self.update_display()
-            return
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Correlation", "Open a processed dataset first.")
-            return
-        name = self.ask_collection_name()
-        if not name:
-            return
-        exemplars = self.cxt.library.get_collection_exemplars(name)
-        if not exemplars:
-            return
-        with busy_cursor('correlation...', self):
-            self.cxt.current = t.wta_min_map_SAM(self.cxt.current, exemplars, name)
-
-        self.choose_view('vis')
-        self.update_display()
-
-    def act_vis_multirange(self, multi = False):
-        modes = ['pearson', 'sam', 'msam']
-        if multi:
-            if self.cxt.ho is None: 
-                QMessageBox.information(self, "Correlation", "No Hole dataset loaded for multibox operations")
-                return
-            name = self.ask_collection_name()
-            if not name:
-                return
-            exemplars = self.cxt.library.get_collection_exemplars(name)
-            if not exemplars:
-                return
-            mode, ok = QInputDialog.getItem(self, "Select Match Mode", "Options:", modes, 0, False)
-            if not ok or not mode:
-                return
-            with busy_cursor('correlation...', self):
-                for po in self.cxt.ho:
-                    t.wta_multi_range_minmap(po, exemplars, name, mode=mode)
-                    po.commit_temps()
-                    po.save_all()
-                    po.reload_all()
-                    po.load_thumbs()
-                    
-            self.choose_view('hol')
-            self.update_display()
-            return
-        
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Correlation", "Open a processed dataset first.")
-            return
-        name = self.ask_collection_name()
-        if not name:
-            return
-        exemplars = self.cxt.library.get_collection_exemplars(name)
-        if not exemplars:
-            return
-        
-        mode, ok = QInputDialog.getItem(self, "Select Match Mode", "Options:", modes, 0, False)
-        if not ok or not mode:
-            return
-        with busy_cursor('correlation...', self):
-            self.cxt.current = t.wta_multi_range_minmap(self.cxt.current, exemplars, name, mode=mode)
-
-        self.choose_view('vis')
-        self.update_display()
-        
-        
-    def act_subrange_corr(self, multi = False):
-        modes = ['pearson', 'sam', 'msam']
-        if multi:
-            if self.cxt.ho is None: 
-                QMessageBox.information(self, "Correlation", "No Hole dataset loaded for multibox operations")
-                return
-            name = self.ask_collection_name()
-            if not name:
-                return
-            exemplars = self.cxt.library.get_collection_exemplars(name)
-            if not exemplars:
-                return
-            mode, ok = QInputDialog.getItem(self, "Select Match Mode", "Options:", modes, 0, False)
-            if not ok or not mode:
-                return
-            ok, start_nm, stop_nm = WavelengthRangeDialog.get_range(
-                parent=self,
-                start_default=0,
-                stop_default=20000,
-            )
-            if not ok:
-                return
-            with busy_cursor('correlation...', self):
-                for po in self.cxt.ho:
-                    try:
-                        t.wta_min_map_user_defined(po, exemplars, name, [start_nm, stop_nm], mode=mode)
-                        po.commit_temps()
-                        po.save_all()
-                        po.reload_all()
-                        po.load_thumbs()
-                        
-                    except ValueError:
-                        continue
-                    
-            self.choose_view('hol')
-            self.update_display()
-            return
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Correlation", "Open a processed dataset first.")
-            return
-        name = self.ask_collection_name()
-        if not name:
-            return
-        exemplars = self.cxt.library.get_collection_exemplars(name)
-        if not exemplars:
-            return
-        
-        mode, ok = QInputDialog.getItem(self, "Select Match Mode", "Options:", modes, 0, False)
-        if not ok or not mode:
-            return
-        ok, start_nm, stop_nm = WavelengthRangeDialog.get_range(
-            parent=self,
-            start_default=0,
-            stop_default=20000,
-        )
-        if not ok:
-            return
-        with busy_cursor('correlation...', self):
-            try:
-                self.cxt.current = t.wta_min_map_user_defined(self.cxt.current, exemplars, name, [start_nm, stop_nm], mode=mode)
-            except Exception as e:
-                QMessageBox.warning(self, "Failed operation", f"Failed to use band range: {e}")
-                return
-
-        self.choose_view('vis')
-        self.update_display()
-
-    def act_vis_msam(self, multi = False):
-        if multi:
-            if self.cxt.ho is None: 
-                QMessageBox.information(self, "Correlation", "No Hole dataset loaded for multibox operations")
-                return
-            name = self.ask_collection_name()
-            if not name:
-                return
-            exemplars = self.cxt.library.get_collection_exemplars(name)
-            if not exemplars:
-                return
-            with busy_cursor('correlation...', self):
-                for po in self.cxt.ho:
-                    t.wta_min_map_MSAM(po, exemplars, name)
-                    po.commit_temps()
-                    po.save_all()
-                    po.reload_all()
-                    po.load_thumbs()
-                    
-            self.choose_view('hol')
-            self.update_display()
-            return
-        
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Correlation", "Open a processed dataset first.")
-            return
-        name = self.ask_collection_name()
-        if not name:
-            return
-        exemplars = self.cxt.library.get_collection_exemplars(name)
-        if not exemplars:
-            return
-        with busy_cursor('correlation...', self):
-            self.cxt.current = t.wta_min_map_MSAM(self.cxt.current, exemplars, name)
-
-        self.choose_view('vis')
-        self.update_display()
-
-
-    def act_kmeans(self, multi = False):
-        if multi:
-            if self.cxt.ho is None: 
-                return
-            clusters, ok1 = QInputDialog.getInt(self, "KMeans Clustering",
-                "Enter number of clusters:",value=5, min=1, max=50)
-            if not ok1:
-                return
-            iters, ok2 = QInputDialog.getInt(self, "KMeans Clustering",
-                "Enter number of iterations:", value=50, min=1, max=1000)
-            if not ok2:
-                return
-        
-            with busy_cursor('clustering...', self):
-                for po in self.cxt.ho:
-                    t.kmeans_caller(po, clusters, iters)
-                    po.commit_temps()
-                    po.save_all()
-                    po.reload_all()
-                    po.load_thumbs()
-                    self.update_display()
-            self.choose_view('hol')
-            self.update_display()
-            return
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Correlation", "No Current Scan")
-            return
-        clusters, ok1 = QInputDialog.getInt(self, "KMeans Clustering",
-            "Enter number of clusters:",value=5, min=1, max=50)
-        if not ok1:
-            return
-        iters, ok2 = QInputDialog.getInt(self, "KMeans Clustering",
-            "Enter number of iterations:", value=50, min=1, max=1000)
-        if not ok2:
-            return
-    
-        with busy_cursor('clustering...', self):
-            self.cxt.current = t.kmeans_caller(self.cxt.current, clusters, iters)
-        self.choose_view('vis')
-    
-        self.update_display(key=f'kmeans-{clusters}-{iters}INDEX')
-
-    def _remap_legends(self):
-        if self.legend_mapping_path is None:
-            QMessageBox.information(
-            self,
-            "Legend remapping",
-            "Legend remapping groups detailed spectral hits into "
-            "interpretable mineral classes.\n\n"
-            "You can choose *any* JSON file that defines these classes.\n"
-            "A recommended default lives in the 'resources' folder.\n\n"
-            "Please select a remapping file now."
-        )
-
-        # Default directory for the QFileDialog
-        
-
-            path, _ = QFileDialog.getOpenFileName(
-                self,
-                "Select legend mapping JSON",
-                ".",
-                "JSON files (*.json)"
-            )
-            if not path:
-                return  # user cancelled — do nothing safely
-            self.legend_mapping_path = path
-        
-        if self.cxt.current is None or self.cxt.current.is_raw:
-            QMessageBox.warning(self, "Open dataset", f"There is no processed dataset loaded")
-        try:
-            self.cxt.current = t.clean_legends(self.cxt.current, self.legend_mapping_path)
-        except Exception as e:
-            QMessageBox.warning(self, "Failed operation", f"Failed to remap legends: {e}")
-            return
-        self._distribute_context()
-        self.update_display()
-        
-    def act_lib_pix(self):
-        """Add a single pixel spectrum to the current library."""
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Add to Library", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Add to Library", "Open a processed dataset first.")
-            return
-        if not self.cxt.library or not self.cxt.library.is_open():
-            QMessageBox.warning(self, "Add to Library", "No library database is open.")
-            return
-        
-        p = self._active_page()
-        if not p or not p.dispatcher or not p.left_canvas:
-            return
-        
-        def handle_point_click(y, x):
-            try:
-                spectrum = self.cxt.current.savgol[int(y), int(x), :]
-                wavelengths_nm = self.cxt.current.bands
-                        
-                # Ask for metadata
-                dlg = LibMetadataDialog(parent=self)
-                if dlg.exec() != QDialog.Accepted:
-                    return  # user cancelled
-                
-                metadata = dlg.get_metadata()
-                name = metadata.get("Name", "").strip()
-                if not name:
-                    QMessageBox.warning(
-                        self, 
-                        "Add to Library", 
-                        "Name is a mandatory field"
-                    )
-                    return
-                
-                metadata['SampleNum'] = f"Hole: {self.cxt.current.metadata.get('borehole id', 'Unknown')} Box: {self.cxt.current.metadata.get('box number', 'Unknown')} Pixel: ({int(y)}, {int(x)})"
-                with busy_cursor('Adding to library...', self):
-                    sample_id = self.cxt.library.add_sample(
-                        name=name,
-                        wavelengths_nm=wavelengths_nm,
-                        reflectance=spectrum,
-                        metadata=metadata
-                    )
-                
-                self.statusBar().showMessage(
-                    f"Added spectrum '{name}' to library (ID: {sample_id})", 
-                    5000
-                )
-                
-            except Exception as e:
-                QMessageBox.warning(
-                    self, 
-                    "Add to Library", 
-                    f"Failed to add spectrum to library: {e}"
-                )
-            finally:
-                p.dispatcher.clear_all_temp()
-        
-        p.dispatcher.set_single_click(handle_point_click)
-        self.statusBar().showMessage("Click a pixel to add its spectrum to the library...")
-
-        
-    def act_lib_region(self):
-        """Add the average spectrum of a region to the current library."""
-        if self.cxt.current is None:
-            QMessageBox.information(self, "Add to Library", "No Current Scan")
-            return
-        if self.cxt.current.is_raw:
-            QMessageBox.information(self, "Add to Library", "Open a processed dataset first.")
-            return
-        if not self.cxt.library or not self.cxt.library.is_open():
-            QMessageBox.warning(self, "Add to Library", "No library database is open.")
-            return
-        
-        p = self._active_page()
-        if not p or not p.dispatcher or not p.left_canvas:
-            return
-        
-        def _on_rect(y0, y1, x0, x1):
-            try:
-                # Extract region and compute average spectrum
-                region = self.cxt.current.savgol[y0:y1, x0:x1, :]
-                
-                # Use mask if available to exclude masked pixels
-                if self.cxt.current.has('mask'):
-                    mask_region = self.cxt.current.mask[y0:y1, x0:x1]
-                    valid_pixels = region[mask_region == 0]
-                    if valid_pixels.size == 0:
-                        QMessageBox.warning(
-                            self, 
-                            "Add to Library", 
-                            "Selected region contains no valid (unmasked) pixels."
-                        )
-                        return
-                    avg_spectrum = valid_pixels.mean(axis=0)
-                    pixel_count = len(valid_pixels)
-                else:
-                    avg_spectrum = region.reshape(-1, region.shape[-1]).mean(axis=0)
-                    pixel_count = (y1 - y0) * (x1 - x0)
-                
-                wavelengths_nm = self.cxt.current.bands
-                
-                dlg = LibMetadataDialog(parent=self)
-                
-                if dlg.exec() != QDialog.Accepted:
-                    return  # user cancelled
-                
-                metadata = dlg.get_metadata()
-                name = metadata.get("Name", "").strip()
-                if not name:
-                    QMessageBox.warning(
-                        self, 
-                        "Add to Library", 
-                        "Name is a mandatory field"
-                    )
-                    return
-                metadata['SampleNum'] = f"Hole: {self.cxt.current.metadata.get('borehole id', 'Unknown')} Box: {self.cxt.current.metadata.get('box number', 'Unknown')} Region: ({y0}-{y1},{x0}-{x1})"
-                
-                
-                with busy_cursor('Adding to library...', self):
-                    sample_id = self.cxt.library.add_sample(
-                        name=name,
-                        wavelengths_nm=wavelengths_nm,
-                        reflectance=avg_spectrum,
-                        metadata=metadata
-                    )
-                    self.choose_view('lib')
-                    self.update_display()
-                
-                self.statusBar().showMessage(
-                    f"Added averaged spectrum '{name}' ({pixel_count} pixels) to library (ID: {sample_id})", 
-                    5000
-                )
-                
-            except Exception as e:
-                QMessageBox.warning(
-                    self, 
-                    "Add to Library", 
-                    f"Failed to add spectrum to library: {e}"
-                )
-            finally:
-                p.dispatcher.clear_all_temp()
-        
-        p.dispatcher.set_rect(_on_rect)
-        p.left_canvas.start_rect_select()
-        self.statusBar().showMessage("Draw a rectangle to average and add to library...")
-        
-        
-            # --- HOLE actions ---
-    def hole_next_box(self):
-        if self.cxt.ho is None or self.cxt.current is None:
-            return
-        if self.cxt.current.is_raw:
-            return
-        try:
-            box_num = int(self.cxt.current.metadata.get("box number"))
-        except Exception:
-            box_num = None
-        if box_num is not None:
-            try:
-                self.cxt.current = self.cxt.ho[box_num+1]
-                self._distribute_context()
-                self.update_display()
-            except KeyError:
-                return
-
-    def hole_prev_box(self):
-        if self.cxt.ho is None or self.cxt.current is None:
-            return
-        if self.cxt.current.is_raw:
-            return
-        try:
-            box_num = int(self.cxt.current.metadata.get("box number"))
-        except Exception:
-            box_num = None
-        if box_num is not None:
-            try:
-                self.cxt.current = self.cxt.ho[box_num-1]
-                self._distribute_context()
-                self.update_display()
-            except KeyError:
-                return
-
-    def hole_return_to_raw(self):
-        if self.cxt.ho is None or self.cxt.current is None:
-            return
-        if self.cxt.current.is_raw:
-            return
-        path = QFileDialog.getExistingDirectory(
-                   self,
-                   "Select directory",
-                   "",
-                   QFileDialog.ShowDirsOnly
-                   )
-        if not path:
-            return
-        box_num = None
-        try:
-            box_num = int(self.cxt.current.metadata.get("box number"))
-        except Exception:
-            box_num = None
-
-        try:
-            with busy_cursor('loading...', self):
-                loaded_obj = t.load(path)
-                if  not loaded_obj.is_raw:
-                    QMessageBox.warning(self, "Return to Raw",
-                        "Selected path is not a raw Lumo directory.")
-                    return
-                new_po = loaded_obj.process()
-                new_po.update_root_dir(self.cxt.current.root_dir)
-                new_po.build_all_thumbs()
-                new_po.save_all_thumbs()
-                if new_po.metadata.get("borehole id") != self.cxt.ho.hole_id:
-                    QMessageBox.warning(self, "Return to Raw",
-                        "The new loaded scan is from a different hole")
-                    return
-                if box_num not in self.cxt.ho.boxes:
-                    QMessageBox.warning(self, "Return to Raw",
-                             f"Box {box_num} not found in current hole.")
-                    return
-                self.cxt.ho.boxes[box_num] = new_po
-                self.cxt.ho.hole_meta[box_num] = new_po.metadata
-
-                self.cxt.current = new_po
-
-                self.choose_view('vis')
-                self.update_display()
-
-        except Exception as e:
-            QMessageBox.warning(self, "Open dataset", f"Failed to open dataset: {e}")
-            return
-
-    def save_all_changes(self):
-        if self.cxt.ho is None or self.cxt.current is None:
-            return
-
-        if self.cxt is not None and self.cxt.ho is not None:
-            with busy_cursor('Saving.....', self):
-                
-                for po in self.cxt.ho:
-                    if po.has_temps:
-                        print(po.metadata['box number'])
-                        po.commit_temps()
-                        po.save_all()
-                        print('saved all, reloading')
-                        po.reload_all()
-                        po.load_thumbs()
-                self.choose_view('hol')
-                self.update_display()
 
 #----------- manage ClusterWindow for interogating cluster centres-------------
     def open_cluster_window(self, cluster_key: str):
@@ -1363,24 +580,25 @@ class MainRibbonController(QMainWindow):
     
         Pinned to whatever self.cxt.current is at the moment of opening.
         """
-        po = self.cxt.current
-        if po is None or getattr(po, "is_raw", False):
-            QMessageBox.information(
-                self,
-                "No processed box",
-                "You need a processed box selected before inspecting clusters.",
-            )
+        logger.info(f"Button clicked: View cluster centres")
+        valid_state, msg = self.cxt.requires(self.cxt.PROCESSED)
+        if not valid_state:
+            logger.warning(msg)
+            QMessageBox.information(self, "Save hole", msg)
             return
-    
-        win = ClusterWindow(
+        po = self.cxt.current
+           
+        # NEW: Use factory method instead of direct constructor
+        win = ClusterWindow.from_processed_object(
             parent=self,
             cxt=self.cxt,
             po=po,
             cluster_key=cluster_key,
         )
+        
         win.setWindowFlag(Qt.Window, True)
         win.setAttribute(Qt.WA_DeleteOnClose, True)
-        win.setWindowTitle(cluster_key)
+        win.setWindowTitle(gen_display_text(cluster_key))
         self.cluster_windows.append(win)
     
         win.destroyed.connect(
@@ -1402,14 +620,17 @@ class MainRibbonController(QMainWindow):
         win.raise_()
     
     def _on_cluster_window_destroyed(self, win: ClusterWindow):
+        logger.info("Button clicked: close cluster window")
         try:
             self.cluster_windows.remove(win)
         except ValueError:
             pass
-    
-    
+        
+
 def main():
+    logger.info("CoreSpecViewer starting...")
     app = QApplication(sys.argv)
     win = MainRibbonController()
     win.showMaximized()  
     sys.exit(app.exec())
+    

@@ -7,6 +7,7 @@ used outside and embedded in the main pages.
 
 
 from contextlib import contextmanager
+from pathlib import Path
 
 import matplotlib
 matplotlib.rcParams['savefig.dpi'] = 600
@@ -18,16 +19,21 @@ from matplotlib.patches import Patch
 from matplotlib.widgets import PolygonSelector, RectangleSelector
 
 import numpy as np
+import logging
+
 
 from PyQt5.QtCore import (
         QSortFilterProxyModel, 
         Qt, 
         pyqtSignal, 
         QModelIndex, 
-        QDateTime)
+        QDateTime,
+        QTimer,
+        QThread)
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QFileDialog,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -42,29 +48,158 @@ from PyQt5.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
+    QComboBox,
+    QDoubleSpinBox
     
 )
+
+logger = logging.getLogger(__name__)
 
 my_map = matplotlib.colormaps['viridis']
 my_map.set_bad('black')
 
+from .display_text import gen_display_text
 from ..interface import tools as t
-from ..spectral_ops import spectral_functions as sf
-
+from ..spectral_ops.visualisation import get_false_colour
 
 #==========reference passing and cache update======================
 @contextmanager
 def busy_cursor(msg=None, window=None):
-    """Temporarily set the cursor to busy; restores automatically."""
-    QApplication.setOverrideCursor(Qt.WaitCursor)
-    if window and hasattr(window, "statusBar") and msg:
-        window.statusBar().showMessage(msg)
+    """
+    Show busy cursor with optional animated status message.
+    
+    Backward compatible - all existing calls work unchanged:
+        with busy_cursor("Loading...", self):
+            do_work()
+    
+    Extended functionality - yield progress object for dynamic updates:
+        with busy_cursor("Processing boxes", self) as progress:
+            for i, po in enumerate(hole):
+                progress.messages[i] = f"Processing {po.basename}"
+                progress.update(i)
+                po.do_thing()
+    
+    Args:
+        msg: Status message to display
+        window: Window with statusBar() for messages
+    
+    Yields:
+        ProgressHelper object (only if used as `with ... as progress:`)
+    """
+    
+    # Create progress helper
+    helper = _ProgressHelper(window, msg)
+    
     try:
-        yield
+        yield helper
     finally:
+        helper.cleanup()
+
+
+class _ProgressHelper:
+    """
+    Shows a small floating window with animated message after 3 seconds.
+    
+    Window appears after 3 seconds if operation is still running.
+    Updates via .set() method and animates with dots.
+    """
+    
+    def __init__(self, parent, base_message):
+        
+        self.parent = parent
+        self.base_message = base_message or "Processing..."
+        
+        self.current_message = base_message
+        
+        self.dialog = None
+        self.label = None
+        self.window_visible = False
+        
+        # Set busy cursor immediately
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+               
+        # Create dialog 
+        
+    
+    def _create_dialog(self):
+        """Create dialog on main thread (hidden initially)"""
+        
+        self.dialog = QDialog(self.parent)
+        self.dialog.setWindowFlags(
+            Qt.FramelessWindowHint | 
+            Qt.WindowStaysOnTopHint | 
+            Qt.Tool
+        )
+        self.dialog.setModal(False)
+        
+        self.label = QLabel(self.base_message)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setStyleSheet("""
+            QLabel {
+                background-color: #2b2b2b;
+                color: #ffffff;
+                padding: 20px 30px;
+                border-radius: 8px;
+                font-size: 13px;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+        """)
+        
+        
+        layout = QVBoxLayout()
+        layout.addWidget(self.label)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.dialog.setLayout(layout)
+    
+    def _show_window(self):
+        """Show dialog"""
+        
+        if not self.dialog:
+            return
+        
+        self.dialog.adjustSize()
+        
+        # Center on parent
+        if self.parent:
+            parent_geo = self.parent.geometry()
+            self.dialog.move(
+                parent_geo.center().x() - self.dialog.width() // 2,
+                parent_geo.center().y() - self.dialog.height() // 2
+            )
+        
+        self.dialog.show()
+        self.dialog.raise_()
+        self.window_visible = True
+        
+              
+        QApplication.processEvents()
+    
+    
+    
+    def set(self, message):
+        """
+        Update the displayed message.
+        
+        Args:
+            message: New message to display
+        """
+        
+        if not self.window_visible:
+            self._create_dialog()
+            self._show_window()
+        if self.label:
+            self.label.setText(message)
+            self.dialog.adjustSize()  # Resize to fit new text
+            QApplication.processEvents()
+    
+    def cleanup(self):
+        """Clean up dialog, and cursor"""
+           
+        if self.dialog:
+            self.dialog.close()
+            self.dialog.deleteLater()
+        
         QApplication.restoreOverrideCursor()
-        if window and hasattr(window, "statusBar"):
-            window.statusBar().clearMessage()
 
 class PopoutWindow(QMainWindow):
     """
@@ -280,24 +415,29 @@ class ImageCanvas2D(QWidget):
         layout.addWidget(self.toolbar)
 
     def show_rgb(self, image):
-
+        if image.dtype == bool:
+            image = image.astype(int)
         shp = getattr(image, "shape", None)
         if not shp or len(shp) == 1:
             return  # ignore 1D/unknown
-
+        
         if len(shp) == 2:
-            a = image.astype(float)
-            amin = np.nanmin(a)
-            amax = np.nanmax(a)
+                   
+            # choose clipping percentiles (tune as needed)
+            lo = np.nanpercentile(image.data, 2)
+            hi = np.nanpercentile(image.data, 98)
         
-            if amax > amin:
-                norm = (a - amin) / (amax - amin)
+            if hi > lo:
+                clipped = np.clip(image, lo, hi)
             else:
-                norm = np.zeros_like(a, dtype=float)
+                clipped = image  # fallback if image is constant
         
-            
             self.ax.clear()
-            self.ax.imshow(norm, cmap=my_map, origin="upper", vmin=0.0, vmax=1.0)
+            self.ax.imshow(
+                clipped,
+                cmap=my_map,
+                origin="upper"
+            )
 
 
         elif len(shp) == 3 and shp[2] == 3:
@@ -306,7 +446,7 @@ class ImageCanvas2D(QWidget):
             self.ax.imshow(rgb, origin="upper")
 
         elif len(shp) == 3 and shp[2] > 3:
-            rgb = sf.get_false_colour(image)
+            rgb = get_false_colour(image)
             self.ax.clear()
             self.ax.imshow(rgb, origin="upper")
         else:
@@ -434,8 +574,8 @@ class ImageCanvas2D(QWidget):
 
         self.canvas.draw_idle()
     
-    
-    def show_fraction_stack(
+    #=====Downhole display methods=======================
+    def display_fractions(
         self,
         depths: np.ndarray,
         fractions: np.ndarray,   # (H, K+1)
@@ -458,6 +598,7 @@ class ImageCanvas2D(QWidget):
         include_unclassified : bool
             If False, hides the last 'unclassified' column.
         """
+        # Existing show_fraction_stack logic
         depths = np.asarray(depths)
         frac = np.asarray(fractions)
         H, C = frac.shape
@@ -499,7 +640,8 @@ class ImageCanvas2D(QWidget):
             else:
                 cid = None
                 name = "Unclassified"
-                color = (0.3, 0.3, 0.3, 1.0)  # dark grey
+                color = (0.7, 0.7, 0.7, 1.0)
+                #color = (0.3, 0.3, 0.3, 1.0)  # dark grey
 
             self.ax.fill_betweenx(
                 depths,
@@ -510,9 +652,9 @@ class ImageCanvas2D(QWidget):
                 edgecolor="none",
                 label=name,
             )
-
-        self.ax.set_xlim(0.0, 1.0)
+        self.ax.set_ylim(depths.min(), depths.max())
         self.ax.invert_yaxis()
+        self.ax.set_xlim(0.0, 1.0)
         self.ax.set_xlabel("Fraction of row width")
         self.ax.set_ylabel("Depth")
         self.ax.grid(True, axis="x", alpha=0.2)
@@ -530,8 +672,119 @@ class ImageCanvas2D(QWidget):
         )
 
         self.canvas.draw_idle()
+       
     
-    def show_graph(self, depths, values, key):
+    def display_discrete(
+        self,
+        depths: np.ndarray,
+        dominant_indices: np.ndarray,
+        legend: list[dict],
+        width: float = 0.1,
+    ):
+
+        """
+        Displays a categorical log track based on dominant mineral indices.
+    
+        The colors are mapped consistently with the stacked log by using the 
+        Mineral Class ID deterministicaly for color selection, but the 
+        Legend Position Index (0..K-1) for array lookup.
+
+        Parameters
+        ----------
+        depths : (H,)
+            Depth per row (same length as fractions.shape[0]).
+        dominant_indices : (H, K+1)
+            Output from compute_fullhole_mineral_fractions.
+            index of the mineral with the greatest abundance in each depth slice
+        legend : list of dict
+            [{'index': int, 'label': str}, ...], length K.
+        
+        
+        
+    
+        """
+        depths = np.asarray(depths)
+        dominant_indices = np.asarray(dominant_indices)
+        if depths[0] > depths[-1]:
+            depths = depths[::-1]
+            dominant_indices = dominant_indices[::-1]
+        self.ax.clear()
+        self.canvas.figure.subplots_adjust(right=0.80)
+        
+        cmap = matplotlib.colormaps.get("tab20") or matplotlib.colormaps["tab10"]
+
+        index_to_color = {}
+        legend_handles = []
+        legend_labels = []
+    
+        for i, entry in enumerate(legend):
+            try:
+                mineral_id = int(entry["index"])
+            except (TypeError, ValueError):
+                continue
+                
+            color = cmap(mineral_id % 20)
+            index_to_color[i] = color 
+            
+            # Collect legend items
+            legend_handles.append(matplotlib.patches.Patch(facecolor=color))
+            legend_labels.append(entry["label"])
+            
+        # Set the color for 'No Dominant Mineral' (-1) 
+        no_data_color = (1.0, 1.0, 1.0, 1.0) # White/Gap
+        index_to_color[-1] = no_data_color
+        legend_handles.append(matplotlib.patches.Patch(facecolor=no_data_color))
+        legend_labels.append("No Dominant / Gap")
+    
+        # 2. Plot the Colored Bars
+        H = dominant_indices.shape[0]
+    
+        for i in range(H):
+            idx = dominant_indices[i] 
+    
+            z_top = depths[i]
+            z_bottom = depths[i+1] if i + 1 < H else depths[-1] + (depths[-1] - depths[-2])
+            
+            color = index_to_color.get(idx, (0.5, 0.5, 0.5, 1.0)) 
+            
+            self.ax.barh(
+                y=z_top, 
+                width=width, 
+                height=z_bottom - z_top, 
+                left=0, 
+                align='edge', 
+                color=color, 
+                edgecolor='none'
+            )
+        
+        # 3. Set up the axis and Legend
+        self.ax.set_ylim(depths.min(), depths.max())
+        self.ax.invert_yaxis()
+        self.ax.set_ylabel("Depth")
+        self.ax.set_xlabel("Dominant Mineral")
+        self.ax.set_xlim(0.0, width)
+        self.ax.set_xticks([]) 
+        self.ax.set_xticklabels([]) 
+    
+        # Display the custom legend
+        
+        self.ax.legend(
+            handles=legend_handles, 
+            labels=legend_labels,
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            borderaxespad=0.0,
+            frameon=True,
+            framealpha=0.9,
+            fontsize=9,
+            handlelength=1.8,
+            handletextpad=0.6,
+        )
+        
+        self.canvas.draw_idle()
+    
+    
+    def display_continuous(self, depths, values, key):
         if depths.shape != values.shape:
             
             return
@@ -539,17 +792,16 @@ class ImageCanvas2D(QWidget):
         
         if depths[0] > depths[-1]:
             depths = depths[::-1]
-            values = values[::-1, :]
-        
+            values = values[::-1]
+        self.ax.clear()
         self.ax.plot(values, depths, 'o-', markersize=3)
         
         self.ax.invert_yaxis()
         self.ax.set_ylabel("Depth (m)")
         self.ax.set_xlabel(key)
         self.ax.grid(True, alpha=0.3)
-        self.canvas.draw()
-    
-    
+        self.canvas.figure.tight_layout()  
+        self.canvas.draw_idle() 
     
     def clear_memmap_refs(self):
         """Clear any matplotlib artists that might hold data references."""
@@ -592,10 +844,21 @@ class SpectralImageCanvas(QWidget):
         self._last_rect = None  # reset any previous ROI
         self.cube = cube
         self.bands = bands
-        rgb = sf.get_false_colour(cube)
-
+        rgb = get_false_colour(cube)
+        logger.debug(f"nans in rgb: {(np.isnan(rgb).any())}")
+        logger.debug(f"shape of false colour {rgb.shape}")
         self.ax.clear()
         self.ax.imshow(rgb, origin="upper")
+        self.ax.set_axis_off()
+        self.canvas.draw()
+        
+    def show_rgb_direct(self, rgb_array, cube, bands):
+        """Display pre-computed RGB"""
+        self._last_rect = None  # reset any previous ROI
+        self.cube = cube
+        self.bands = bands
+        self.ax.clear()
+        self.ax.imshow(rgb_array, origin="upper")
         self.ax.set_axis_off()
         self.canvas.draw()
 
@@ -827,7 +1090,6 @@ class SpectrumWindow(QMainWindow):
         self.clear_all()
 
 
-
 class LibMetadataDialog(QDialog):
     """
     Dialog that dynamically builds metadata fields from a list of column names.
@@ -880,6 +1142,9 @@ class LibMetadataDialog(QDialog):
 
 
 class MetadataDialog(QDialog):
+    """
+    Dialog that requests mandatory metadata values
+    """
     def __init__(self, meta=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Specim Metadata")
@@ -992,6 +1257,149 @@ class WavelengthRangeDialog(QDialog):
         return False, None, None
 
 
+class ProfileExportDialog(QDialog):
+    """
+    Dialog to choose:
+      - a dataset key (dropdown)
+      - a step value (numeric)
+      - an output directory (browse)
+
+    Usage:
+        ok, key, step, out_dir, mode = ProfileExportDialog.get_values(
+            parent=self,
+            keys=keys,
+            step_default=hole.step,
+            dir_default=hole.root / "profiles",
+            title="Export profiles")
+    """
+
+    def __init__(
+        self,
+        parent=None,
+        keys=None,
+        step_default=None,
+        dir_default=None,
+        title="Export profile csv",
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+
+        self.keys = list(keys or [])
+        self.display_keys = [gen_display_text(key) for key in self.keys]
+        self.key_map = dict(zip(self.display_keys, self.keys))
+        
+        dir_default = Path(dir_default) if dir_default is not None else None
+
+        # --- Widgets ---
+        key_label = QLabel("Dataset key:")
+        self.key_combo = QComboBox()
+        self.key_combo.addItems([str(k) for k in self.display_keys])
+
+        step_label = QLabel("Step:")
+        self.step_spin = QDoubleSpinBox()
+        self.step_spin.setDecimals(2)
+        self.step_spin.setSingleStep(0.01)
+        self.step_spin.setMinimum(0.01)        # avoid zero unless meaningful
+        self.step_spin.setMaximum(1_000_000.0) # arbitrary large ceiling
+        if step_default is not None:
+            self.step_spin.setValue(float(step_default))
+
+        dir_label = QLabel("Output folder:")
+        self.dir_edit = QLineEdit()
+        self.dir_edit.setReadOnly(False)  # set True if you want browse-only
+        if dir_default is not None:
+            self.dir_edit.setText(str(dir_default))
+
+        self.browse_btn = QPushButton("Browse…")
+        self.browse_btn.clicked.connect(self._browse_for_dir)
+
+        export_modes = ["full", "stepped", "both"]
+        export_labels = ["Every pixel", "Resampled data", "Both"]
+        self.mode_map = dict(zip(export_labels, export_modes))
+        mode_label = QLabel("What do you want to export?")
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([str(k) for k in export_labels])
+        
+
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            orientation=Qt.Horizontal,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        # --- Layout ---
+        row_key = QHBoxLayout()
+        row_key.addWidget(key_label)
+        row_key.addWidget(self.key_combo)
+
+        row_step = QHBoxLayout()
+        row_step.addWidget(step_label)
+        row_step.addWidget(self.step_spin)
+
+        row_dir = QHBoxLayout()
+        row_dir.addWidget(dir_label)
+        row_dir.addWidget(self.dir_edit)
+        row_dir.addWidget(self.browse_btn)
+        
+        row_mode = QHBoxLayout()
+        row_mode.addWidget(mode_label)
+        row_mode.addWidget(self.mode_combo)
+
+        main = QVBoxLayout()
+        main.addLayout(row_key)
+        main.addLayout(row_step)
+        main.addLayout(row_dir)
+        main.addLayout(row_mode)
+        main.addWidget(buttons)
+        self.setLayout(main)
+
+    def _browse_for_dir(self):
+        start_dir = self.dir_edit.text().strip() or ""
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Select output folder",
+            start_dir,
+        )
+        if chosen:
+            self.dir_edit.setText(chosen)
+
+    def values(self):
+        """
+        Return (key, step, out_dirpath) or (None, None, None) if invalid.
+        """
+        display = self.key_combo.currentText().strip()
+        step = float(self.step_spin.value())
+        out_text = self.dir_edit.text().strip()
+        mode_selected = self.mode_combo.currentText().strip()
+    
+        if not display or not out_text:
+            return None, None, None, None
+    
+        key = self.key_map.get(display)
+        if key is None:
+            return None, None, None, None
+        
+        mode = self.mode_map.get(mode_selected)
+    
+        return key, step, Path(out_text), mode
+
+    @classmethod
+    def get_values(cls, parent=None, keys=None, step_default=None, dir_default=None, title=None):
+        dlg = cls(
+            parent=parent,
+            keys=keys,
+            step_default=step_default,
+            dir_default=dir_default,
+            title=title or "Select export options",
+        )
+        result = dlg.exec_()
+        if result == QDialog.Accepted:
+            key, step, out_dir, mode = dlg.values()
+            return True, key, step, out_dir, mode
+        return False, None, None, None, None
 
 class AutoSettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -1027,9 +1435,10 @@ class AutoSettingsDialog(QDialog):
         root.addLayout(row)
 
     def _on_save(self):
+        
         for r in range(self.tbl.rowCount()):
             key = self.tbl.item(r, 0).text()
             val = self.tbl.item(r, 1).text()
             t.modify_config(key, val)
-
+            logger.info(f"Config setting {key} changed to {val}")
         self.accept()

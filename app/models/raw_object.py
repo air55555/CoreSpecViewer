@@ -8,11 +8,16 @@ Provides reflectance conversion for further processing.
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+import logging
 
 import numpy as np
 
-from ..spectral_ops import spectral_functions as sf
+from ..spectral_ops import IO as io
+from ..spectral_ops.visualisation import get_false_colour
+from ..spectral_ops.processing import process
 from .processed_object import ProcessedObject
+
+logger = logging.getLogger(__name__)
 
 SPECIM_LUMO_REQUIRED = {
     "data head":    "{id}.hdr",
@@ -59,15 +64,14 @@ class RawObject:
         """On initialization, populate metadata and compute reflectance."""
         self.get_metadata()
         self.get_reflectance()
-
-
+        
     def get_metadata(self):
         """Load and merge Specim XML + ENVI header metadata if available."""
         if 'metadata' in self.files.keys() and 'data head' in self.files.keys():
-            self.metadata = sf.parse_lumo_metadata(self.files['metadata']) | sf.read_envi_header(self.files['data head'])
+            self.metadata = io.parse_lumo_metadata(self.files['metadata']) | io.read_envi_header(self.files['data head'])
             self.sensor = self.metadata['sensor type']
         elif 'metadata' not in self.files.keys() and 'data head' in self.files.keys():
-            self.metadata = sf.read_envi_header(self.files['data head'])
+            self.metadata = io.read_envi_header(self.files['data head'])
             self.sensor = self.metadata['sensor type']
     @property
     def is_raw(self) -> bool:
@@ -136,13 +140,13 @@ class RawObject:
 
         # Add a print or logging statement for non-critical issues (optional)
         if missing or duplicates or zero_byte:
-            print(f"⚠️ Warning: Non-critical files issues found for {box_id}:")
+            logger.info(f"Warning: Non-critical files issues found for {box_id}:")
             if missing:
-                print(f"  Missing (Skipped): {missing}")
+                logger.warning(f"  Missing (Skipped): {missing}")
             if duplicates:
-                print(f"  Duplicates (Skipped): {duplicates}")
+                logger.warning(f"  Duplicates (Skipped): {duplicates}")
             if zero_byte:
-                print(f"  Zero Byte (Skipped): {zero_byte}")
+                logger.warning(f"  Zero Byte (Skipped): {zero_byte}")
 
         return raw_object
 
@@ -154,7 +158,7 @@ class RawObject:
             return self.reflectance
 
         if "fenix" not in self.sensor.lower():
-            self.reflectance, self.bands, self.snr = sf.find_snr_and_reflect(
+            self.reflectance, self.bands, self.snr = io.find_snr_and_reflect(
                 self.files['data head'],
                 self.files['white head'],
                 self.files['dark head'],
@@ -164,11 +168,16 @@ class RawObject:
                 dark_data_path=self.files['dark raw'],
             )
         else:
-            self.reflectance, self.bands, self.snr = sf.get_fenix_reflectance(str(self.root_dir))
+            logger.debug(f"length of loaded bands {len(self.metadata['wavelength'])}")
+            if len(self.metadata['wavelength']) < 400:
+                self.reflectance, self.bands, self.snr = io.get_fenix_reflectance(str(self.root_dir), mode='hylite')
+            else:
+                self.reflectance, self.bands, self.snr = io.get_fenix_reflectance(str(self.root_dir), mode='derived')
     
         return self.reflectance
 
     def get_reflectance(self):
+        
         """
         Return or compute the reflectance cube (without QA/QC).
         Fenix systems require fish-eye and other corrections, this is all off-loaded to hylite,
@@ -176,9 +185,9 @@ class RawObject:
         """
         if getattr(self, "reflectance", None) is not None:
             return self.reflectance
-
+        logger.info(f"{(self.sensor.lower())} sensor detected")
         if "fenix" not in self.sensor.lower():
-            self.reflectance, self.bands, self.snr = sf.find_snr_and_reflect(
+            self.reflectance, self.bands, self.snr = io.find_snr_and_reflect(
                 self.files['data head'],
                 self.files['white head'],
                 self.files['dark head'],
@@ -188,13 +197,17 @@ class RawObject:
                 dark_data_path=self.files['dark raw'],
             )
         else:
-            self.reflectance, self.bands, self.snr = sf.get_fenix_reflectance(str(self.root_dir))
+            logger.debug(f"length of loaded bands {len(self.metadata['wavelength'])}")
+            if len(self.metadata['wavelength']) < 400:
+                self.reflectance, self.bands, self.snr = io.get_fenix_reflectance(str(self.root_dir), mode='hylite')
+            else:
+                self.reflectance, self.bands, self.snr = io.get_fenix_reflectance(str(self.root_dir), mode='derived')
     
         return self.reflectance
     def get_false_colour(self, bands=None):
         """Generate a false-colour RGB composite for visualization."""
         if hasattr(self, "reflectance") and self.reflectance is not None:
-            return sf.get_false_colour(self.reflectance, bands=bands)
+            return get_false_colour(self.reflectance, bands=bands)
         
     
     @classmethod  
@@ -303,6 +316,7 @@ class RawObject:
     
         # CRITICAL CHECK: Still raise an error if any critical files are missing/invalid
         if critical_missing:
+            logger.error(f"Cannot create raw dataset: Critical files are missing or invalid: {critical_missing}")
             raise ValueError(
                 f"Cannot create raw dataset: Critical files are missing or invalid: {critical_missing}"
             )
@@ -319,13 +333,13 @@ class RawObject:
     
         # Optional: print warnings about non-critical issues
         if missing or duplicates or zero_byte:
-            print(f"⚠️ Warning: Non-critical file issues found for {box_id}:")
+            logger.warning(f" Warning: Non-critical files issues found for {box_id}:")
             if missing:
-                print(f"  Missing (Skipped): {missing}")
+                logger.warning(f"  Missing (Skipped): {missing}")
             if duplicates:
-                print(f"  Duplicates (Skipped): {duplicates}")
+                logger.warning(f"  Duplicates (Skipped): {duplicates}")
             if zero_byte:
-                print(f"  Zero Byte (Skipped): {zero_byte}")
+                logger.warning(f"  Zero Byte (Skipped): {zero_byte}")
     
         return raw_object
     
@@ -386,6 +400,7 @@ class RawObject:
     
         # Raise for *any* critical failure
         if critical_missing:
+            logger.error(f"Cannot create raw dataset: Critical files are missing or invalid: {critical_missing}")
             raise ValueError(
                 f"Cannot create raw dataset: Critical files are missing or invalid: {critical_missing}"
             )
@@ -432,13 +447,13 @@ class RawObject:
     
         # Optional warning summary
         if missing or duplicates or zero_byte:
-            print(f"⚠️ Warning: Non-critical file issues for {box_id}:")
+            logger.warning(f"Warning: Non-critical files issues found for {box_id}:")
             if missing:
-                print(f"  Missing: {missing}")
+                logger.warning(f"  Missing (Skipped): {missing}")
             if duplicates:
-                print(f"  Duplicates: {duplicates}")
+                logger.warning(f"  Duplicates (Skipped): {duplicates}")
             if zero_byte:
-                print(f"  Zero-byte: {zero_byte}")
+                logger.warning(f"  Zero Byte (Skipped): {zero_byte}")
     
         return raw_object
     
@@ -460,10 +475,11 @@ class RawObject:
         po.add_dataset('metadata', self.metadata, ext='.json')
         po.add_dataset('cropped', self.reflectance, ext='.npy')
         po.add_dataset('bands', self.bands, ext='.npy')
-        savgol, savgol_cr, mask = sf.process(self.reflectance)
+        savgol, savgol_cr, mask = process(self.reflectance)
         po.add_dataset('savgol', savgol, ext='.npy')
         po.add_dataset('savgol_cr', savgol_cr, ext='.npy')
         po.add_dataset('mask', mask, ext='.npy')
+        po._generate_display()
         po.build_all_thumbs()
         return po
 

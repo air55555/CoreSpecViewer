@@ -2,8 +2,6 @@
 gifs/
 *.gif
 
-# ignore environmemt file
-*.yml
 
 # Ignore Python build and environment files
 __pycache__/

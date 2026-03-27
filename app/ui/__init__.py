@@ -36,7 +36,7 @@ from .catalogue_window import CatalogueWindow
 from .hole_page import HolePage
 from .lib_page import LibraryPage
 from .raw_page import RawPage
-from .ribbon import Groups, Ribbon
+from .ribbon import Groups, Ribbon, GroupedRibbon,FlexibleRibbon
 from .util_windows import (
     AutoSettingsDialog,
     ImageCanvas2D,
@@ -48,7 +48,8 @@ from .util_windows import (
     busy_cursor,
     choice_box,
     two_choice_box,
-    WavelengthRangeDialog
+    WavelengthRangeDialog,
+    ProfileExportDialog
 )
 from .vis_page import VisualisePage
 
@@ -60,6 +61,8 @@ __all__ = [
     "CatalogueWindow",
     "Ribbon",
     "Groups",
+    "GroupedRibbon",
+    "FlexibleRibbon",
     "SpectralImageCanvas",
     "ImageCanvas2D",
     "InfoTable",
@@ -71,5 +74,6 @@ __all__ = [
     "choice_box",
     "InfoTable",
     "busy_cursor",
-    "WavelengthRangeDialog"
+    "WavelengthRangeDialog",
+    "ProfileExportDialog"
 ]
